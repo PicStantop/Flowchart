@@ -240,8 +240,9 @@ function Landing({ onStudent, onTeacher }) {
         boxShadow:"0 0 24px #0c4a6e55",WebkitTapHighlightColor:"transparent"}}>👨‍🎓 I'm a Student</button>
       <button onClick={onTeacher} style={{padding:"13px 32px",borderRadius:12,
         border:"1.5px solid #1e3a5f",cursor:"pointer",background:"transparent",
-        color:"#475569",fontSize:14,fontWeight:800,fontFamily:"inherit",WebkitTapHighlightColor:"transparent"}}>👩‍🏫 Teacher Login </button>
-}
+        color:"#475569",fontSize:14,fontWeight:800,fontFamily:"inherit",WebkitTapHighlightColor:"transparent"}}>👩‍🏫 Teacher Login</button>
+    </div>
+ </div>;
 
 // ── Student Auth ──────────────────────────────────────────────────────────────
 function StudentAuth({ onLogin, onBack }) {
