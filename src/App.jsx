@@ -539,10 +539,14 @@ function TeacherDashboard({ onLogout, baseEx }) {
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [screen,setScreen]=useState("landing");
+  const [screen,setScreen]=useState(()=>{
+    try{ const s=sessionStorage.getItem("fb_screen"); return s==="student"?"student":"landing"; }catch{ return "landing"; }
+  });
   const [customEx,setCustomEx]=useState({jss2:[],ss2:[]});
   const [loaded,setLoaded]=useState(false);
-  const [currentUser,setCurrentUser]=useState(null);
+  const [currentUser,setCurrentUser]=useState(()=>{
+    try{ const u=sessionStorage.getItem("fb_user"); return u?JSON.parse(u):null; }catch{ return null; }
+  });
 
   // Builder state
   const [cIdx,setCIdx]=useState(0);
@@ -569,6 +573,17 @@ export default function App() {
   useEffect(()=>{
     dbLoadCustomEx().then(ex=>{setCustomEx(ex);setLoaded(true);});
   },[]);
+
+  // Persist session across refreshes
+  useEffect(()=>{
+    try{ sessionStorage.setItem("fb_screen",screen); }catch{}
+  },[screen]);
+  useEffect(()=>{
+    try{
+      if(currentUser) sessionStorage.setItem("fb_user",JSON.stringify(currentUser));
+      else sessionStorage.removeItem("fb_user");
+    }catch{}
+  },[currentUser]);
 
   const allEx=useCallback(lvl=>[...BASE[lvl],...(customEx[lvl]||[])],[customEx]);
   const ch=currentUser?allEx(currentUser.level)[cIdx]:null;
@@ -844,7 +859,7 @@ export default function App() {
           <span style={{fontSize:10,color:"#34d399",fontWeight:700}}>{pct}%</span>
           <span style={{fontSize:10,color:MUTED}}>{completed}/{exList.length}</span>
         </div>
-        <button onClick={()=>{setCurrentUser(null);setScreen("landing");}} style={{marginLeft:"auto",
+        <button onClick={()=>{setCurrentUser(null);setScreen("landing");try{sessionStorage.clear();}catch{}}} style={{marginLeft:"auto",
           padding:"3px 9px",borderRadius:5,border:`1px solid ${BORDER}`,background:"transparent",
           color:MUTED,fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>Log out</button>
       </header>
