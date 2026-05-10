@@ -232,7 +232,7 @@ function Landing({ onStudent, onTeacher }) {
     <div style={{textAlign:"center",marginBottom:40}}>
       <div style={{fontSize:52,marginBottom:10}}>📊</div>
       <h1 style={{fontSize:28,fontWeight:900,color:"#38bdf8",margin:0,letterSpacing:-1}}>FlowBuilder</h1>
-      <p style={{color:"#2a4a70",fontSize:13,marginTop:7}}>Interactive Flowchart Practice · Digital Technology</p>
+      <p style={{color:"#2a4a70",fontSize:13,marginTop:7}}>Interactive Flowchart Practice · Computer Studies</p>
     </div>
     <div style={{display:"flex",gap:14,flexWrap:"wrap",justifyContent:"center"}}>
       <button onClick={onStudent} style={{padding:"13px 32px",borderRadius:12,border:"none",cursor:"pointer",
@@ -242,7 +242,8 @@ function Landing({ onStudent, onTeacher }) {
         border:"1.5px solid #1e3a5f",cursor:"pointer",background:"transparent",
         color:"#475569",fontSize:14,fontWeight:800,fontFamily:"inherit",WebkitTapHighlightColor:"transparent"}}>👩‍🏫 Teacher Login</button>
     </div>
- </div>;
+  </div>;
+}
 
 // ── Student Auth ──────────────────────────────────────────────────────────────
 function StudentAuth({ onLogin, onBack }) {
