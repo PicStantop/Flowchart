@@ -1,4 +1,71 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+// ── Supabase ──────────────────────────────────────────────────────────────────
+const SUPA_URL = "https://bbgknqoqnpzlxczlqrew.supabase.co";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiZ2tucW9xbnB6bHhjemxxcmV3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzNDY5MzcsImV4cCI6MjA5MzkyMjkzN30.X5hv3ePicD8P-qSkyPW5dyBrmUlSoSqPdKCI6xdlBZU";
+const db = createClient(SUPA_URL, SUPA_KEY);
+
+// ── DB helpers ────────────────────────────────────────────────────────────────
+async function dbLoadUsers() {
+  try {
+    const [{ data: users }, { data: prog }] = await Promise.all([
+      db.from("users").select("*"),
+      db.from("progress").select("*"),
+    ]);
+    return (users || []).map(u => ({
+      id: u.id, name: u.name, level: u.level, createdAt: u.created_at,
+      progress: Object.fromEntries(
+        (prog || []).filter(p => p.user_id === u.id).map(p => [
+          p.exercise_id,
+          { completed: p.completed, attempts: p.attempts,
+            lastAttempt: p.last_attempt, completedAt: p.completed_at },
+        ])
+      ),
+    }));
+  } catch { return []; }
+}
+
+async function dbRegisterUser(user) {
+  const { error } = await db.from("users").insert({
+    id: user.id, name: user.name, level: user.level, created_at: user.createdAt,
+  });
+  return !error;
+}
+
+async function dbSaveProgress(userId, exId, data) {
+  await db.from("progress").upsert({
+    user_id: userId, exercise_id: exId,
+    completed: data.completed, attempts: data.attempts,
+    last_attempt: data.lastAttempt || null,
+    completed_at: data.completedAt || null,
+  }, { onConflict: "user_id,exercise_id" });
+}
+
+async function dbLoadCustomEx() {
+  try {
+    const { data } = await db.from("custom_exercises").select("*");
+    const out = { jss2: [], ss2: [] };
+    (data || []).forEach(ex => {
+      if (out[ex.level]) out[ex.level].push({
+        id: ex.id, title: ex.title, desc: ex.description,
+        hint: ex.hint || "", steps: ex.steps, req: ex.req,
+      });
+    });
+    return out;
+  } catch { return { jss2: [], ss2: [] }; }
+}
+
+async function dbAddCustomEx(level, ex) {
+  await db.from("custom_exercises").insert({
+    id: ex.id, level, title: ex.title, description: ex.desc,
+    hint: ex.hint, steps: ex.steps, req: ex.req,
+  });
+}
+
+async function dbDeleteCustomEx(id) {
+  await db.from("custom_exercises").delete().eq("id", id);
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const GRID = 28;
@@ -92,20 +159,16 @@ const BASE = {
 // ── Correction tips ───────────────────────────────────────────────────────────
 function getTips(nodes, conns, ch) {
   if (!nodes.length) return [{ sev:"error", icon:"📋", title:"Canvas is empty",
-    msg:"Start by dragging shapes from the left panel. Begin with a Start terminal, then add the shapes needed for this problem." }];
-
+    msg:"Start by dragging (or tapping) shapes from the left panel. Begin with a Start terminal." }];
   const cnt = {};
   nodes.forEach(n => { cnt[n.type]=(cnt[n.type]||0)+1; });
-
   const tips = [];
-  if ((cnt.terminal||0)<2)
-    tips.push({ sev:"error", icon:"🔴", title:"Missing Start/End terminals",
-      msg:`Every flowchart must have a START and END terminal (rounded rectangles). You have ${cnt.terminal||0}. Drag ${2-(cnt.terminal||0)} more from the palette.` });
-
+  if ((cnt.terminal||0)<2) tips.push({ sev:"error", icon:"🔴", title:"Missing Start/End terminals",
+    msg:`Every flowchart needs a START and END terminal. You have ${cnt.terminal||0} — drag ${2-(cnt.terminal||0)} more.` });
   const help = {
-    process: "Process boxes (rectangles) handle calculations and assignments like Sum=A+B or N=N+1.",
+    process:"Process boxes (rectangles) handle calculations and assignments like Sum=A+B or N=N+1.",
     decision:"Decision diamonds ask a Yes/No question and split the flow into TWO paths.",
-    io:      "Input/Output parallelograms READ data from the user or DISPLAY/PRINT a result.",
+    io:"Input/Output parallelograms READ data from the user or DISPLAY/PRINT a result.",
     terminal:"Terminals (rounded rectangles) mark the START and END of your flowchart.",
   };
   Object.entries(ch.req).forEach(([type,need]) => {
@@ -114,46 +177,20 @@ function getTips(nodes, conns, ch) {
       title:`Need ${need-have} more "${SYM[type].label}" shape${need-have>1?"s":""}`,
       msg: help[type] });
   });
-
   const out={}, inc={};
   conns.forEach(c=>{ out[c.from]=(out[c.from]||0)+1; inc[c.to]=(inc[c.to]||0)+1; });
-
   const isolated = nodes.filter(n=>!out[n.id]&&!inc[n.id]);
-  if (isolated.length)
-    tips.push({ sev:"error", icon:"🔗",
-      title:`${isolated.length} unconnected shape${isolated.length>1?"s":""}`,
-      msg:"Switch to 🔗 Connect mode, click the source shape first (it glows orange), then click the destination. Every shape must be part of the flow." });
-
+  if (isolated.length) tips.push({ sev:"error", icon:"🔗",
+    title:`${isolated.length} unconnected shape${isolated.length>1?"s":""}`,
+    msg:"Switch to 🔗 Connect mode, tap the source shape first (it glows orange), then tap the destination." });
   nodes.filter(n=>n.type==="decision").forEach(d=>{
-    if ((out[d.id]||0)<2)
-      tips.push({ sev:"tip", icon:"💡",
-        title:`"${d.text}" needs 2 outgoing arrows`,
-        msg:`A Decision diamond must have TWO arrows out — one for YES and one for NO. It currently has ${out[d.id]||0}.` });
+    if ((out[d.id]||0)<2) tips.push({ sev:"tip", icon:"💡",
+      title:`"${d.text}" needs 2 outgoing arrows`,
+      msg:`A Decision diamond must have TWO arrows out — one YES and one NO. It has ${out[d.id]||0}.` });
   });
-
-  if (conns.length===0&&nodes.length>1)
-    tips.push({ sev:"tip", icon:"➡️", title:"No arrows drawn yet",
-      msg:"Switch to 🔗 Connect mode in the toolbar, then click shapes in sequence to draw arrows between them." });
-
-  if (!tips.length)
-    tips.push({ sev:"ok", icon:"✅", title:"Looking good!",
-      msg:"Shape counts and connections are correct. Your flowchart looks well structured!" });
-
+  if (!tips.length) tips.push({ sev:"ok", icon:"✅", title:"Looking good!",
+    msg:"Shape counts and connections are correct. Your flowchart looks well structured!" });
   return tips;
-}
-
-// ── Storage helpers (localStorage) ───────────────────────────────────────────
-async function loadUsers() {
-  try { const r=localStorage.getItem("fb_users"); return r?JSON.parse(r):[]; } catch{ return []; }
-}
-async function saveUsers(u) {
-  try { localStorage.setItem("fb_users",JSON.stringify(u)); } catch{}
-}
-async function loadCustomEx() {
-  try { const r=localStorage.getItem("fb_exercises"); return r?JSON.parse(r):{jss2:[],ss2:[]}; } catch{ return {jss2:[],ss2:[]}; }
-}
-async function saveCustomEx(e) {
-  try { localStorage.setItem("fb_exercises",JSON.stringify(e)); } catch{}
 }
 
 // ── Shape SVG ─────────────────────────────────────────────────────────────────
@@ -172,77 +209,94 @@ function Shape({ type, text, w, h, selected }) {
     <polygon points={`${sk},2 ${w-2},2 ${w-2-sk},${h-2} 2,${h-2}`} fill={s.fill} stroke={sc} strokeWidth={sw}/>{lbl}</svg>;
 }
 
-function PaletteItem({ type, onDragStart }) {
+// ── Palette item (desktop drag + mobile tap-to-place) ─────────────────────────
+function PaletteItem({ type, onDragStart, onTap }) {
   const [hov,setHov]=useState(false);
-  return <div draggable onDragStart={e=>onDragStart(e,type)}
-    onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-    style={{marginBottom:7,cursor:"grab",opacity:hov?1:.8,transform:hov?"translateX(3px)":"none",transition:"all .15s"}}>
-    <Shape type={type} text={SYM[type].label} w={W(type)} h={H(type)}/></div>;
+  return (
+    <div draggable
+      onDragStart={e=>onDragStart(e,type)}
+      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      onClick={()=>onTap(type)}
+      style={{marginBottom:7,cursor:"pointer",opacity:hov?1:.85,
+              transform:hov?"translateX(3px)":"none",transition:"all .15s",
+              WebkitTapHighlightColor:"transparent"}}>
+      <Shape type={type} text={SYM[type].label} w={W(type)} h={H(type)}/>
+    </div>
+  );
 }
 
 // ── Landing ───────────────────────────────────────────────────────────────────
 function Landing({ onStudent, onTeacher }) {
   return <div style={{height:"100vh",background:"#060d1a",display:"flex",flexDirection:"column",
-    alignItems:"center",justifyContent:"center",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
-    <div style={{textAlign:"center",marginBottom:44}}>
-      <div style={{fontSize:54,marginBottom:10}}>📊</div>
-      <h1 style={{fontSize:30,fontWeight:900,color:"#38bdf8",margin:0,letterSpacing:-1}}>FlowBuilder</h1>
+    alignItems:"center",justifyContent:"center",fontFamily:"'Segoe UI',system-ui,sans-serif",padding:"0 20px"}}>
+    <div style={{textAlign:"center",marginBottom:40}}>
+      <div style={{fontSize:52,marginBottom:10}}>📊</div>
+      <h1 style={{fontSize:28,fontWeight:900,color:"#38bdf8",margin:0,letterSpacing:-1}}>FlowBuilder</h1>
       <p style={{color:"#2a4a70",fontSize:13,marginTop:7}}>Interactive Flowchart Practice · Computer Studies</p>
     </div>
-    <div style={{display:"flex",gap:16}}>
-      <button onClick={onStudent} style={{padding:"14px 34px",borderRadius:12,border:"none",cursor:"pointer",
+    <div style={{display:"flex",gap:14,flexWrap:"wrap",justifyContent:"center"}}>
+      <button onClick={onStudent} style={{padding:"13px 32px",borderRadius:12,border:"none",cursor:"pointer",
         background:"#0c4a6e",color:"#7dd3fc",fontSize:14,fontWeight:800,fontFamily:"inherit",
-        boxShadow:"0 0 24px #0c4a6e55"}}>👨‍🎓 I'm a Student</button>
-      <button onClick={onTeacher} style={{padding:"14px 34px",borderRadius:12,
+        boxShadow:"0 0 24px #0c4a6e55",WebkitTapHighlightColor:"transparent"}}>👨‍🎓 I'm a Student</button>
+      <button onClick={onTeacher} style={{padding:"13px 32px",borderRadius:12,
         border:"1.5px solid #1e3a5f",cursor:"pointer",background:"transparent",
-        color:"#475569",fontSize:14,fontWeight:800,fontFamily:"inherit"}}>👩‍🏫 Teacher Login</button>
+        color:"#475569",fontSize:14,fontWeight:800,fontFamily:"inherit",WebkitTapHighlightColor:"transparent"}}>👩‍🏫 Teacher Login</button>
     </div>
-    <p style={{color:"#1e3a5f",fontSize:10,marginTop:28}}>Teacher password: <strong style={{color:"#334d6e"}}>teacher2024</strong></p>
+    <p style={{color:"#1e3a5f",fontSize:10,marginTop:26}}>Teacher password: <strong style={{color:"#334d6e"}}>teacher2024</strong></p>
   </div>;
 }
 
 // ── Student Auth ──────────────────────────────────────────────────────────────
-function StudentAuth({ users, onLogin, onRegister, onBack }) {
+function StudentAuth({ onLogin, onBack }) {
   const [tab,setTab]=useState("login");
   const [name,setName]=useState("");
   const [level,setLevel]=useState("jss2");
   const [err,setErr]=useState("");
-  const BG="#060d1a", PANEL="#0c1628", BORDER="#1e3a5f";
+  const [loading,setLoading]=useState(false);
+  const BG="#060d1a",PANEL="#0c1628",BORDER="#1e3a5f";
   const inp={width:"100%",padding:"9px 12px",borderRadius:7,border:`1px solid ${BORDER}`,
-    background:"#0a1628",color:"#e2e8f0",fontSize:13,fontFamily:"inherit",outline:"none"};
+    background:"#0a1628",color:"#e2e8f0",fontSize:13,fontFamily:"inherit",outline:"none",boxSizing:"border-box"};
 
-  const go = () => {
-    const t=name.trim();
-    if (!t) { setErr("Please enter your name."); return; }
-    if (tab==="login") {
-      const u=users.find(u=>u.name.toLowerCase()===t.toLowerCase()&&u.level===level);
-      if (!u) { setErr("Not found. Check name & class, or register first."); return; }
-      onLogin(u);
+  const go=async()=>{
+    const t=name.trim(); if(!t){setErr("Please enter your name.");return;}
+    setLoading(true); setErr("");
+    if(tab==="login"){
+      const {data}=await db.from("users").select("*").ilike("name",t).eq("level",level);
+      if(!data||data.length===0){setErr("Not found. Check name & class, or register first.");setLoading(false);return;}
+      const u=data[0];
+      const {data:prog}=await db.from("progress").select("*").eq("user_id",u.id);
+      const progress=Object.fromEntries((prog||[]).map(p=>[p.exercise_id,
+        {completed:p.completed,attempts:p.attempts,lastAttempt:p.last_attempt,completedAt:p.completed_at}]));
+      onLogin({...u,createdAt:u.created_at,progress});
     } else {
-      if (users.find(u=>u.name.toLowerCase()===t.toLowerCase()&&u.level===level))
-        { setErr("Name already exists in this class. Try logging in."); return; }
-      onRegister(t,level);
+      const {data:existing}=await db.from("users").select("id").ilike("name",t).eq("level",level);
+      if(existing&&existing.length>0){setErr("Name already registered in this class. Try logging in.");setLoading(false);return;}
+      const newUser={id:`u${Date.now()}`,name:t,level,createdAt:Date.now(),progress:{}};
+      const ok=await dbRegisterUser(newUser);
+      if(!ok){setErr("Registration failed. Please try again.");setLoading(false);return;}
+      onLogin(newUser);
     }
+    setLoading(false);
   };
 
   return <div style={{height:"100vh",background:BG,display:"flex",alignItems:"center",
-    justifyContent:"center",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
-    <div style={{background:PANEL,borderRadius:14,border:`1px solid ${BORDER}`,padding:"30px 34px",width:340}}>
+    justifyContent:"center",fontFamily:"'Segoe UI',system-ui,sans-serif",padding:"0 16px"}}>
+    <div style={{background:PANEL,borderRadius:14,border:`1px solid ${BORDER}`,padding:"28px 28px",width:"100%",maxWidth:340}}>
       <button onClick={onBack} style={{background:"none",border:"none",color:"#475569",cursor:"pointer",
         fontSize:12,marginBottom:14,padding:0,fontFamily:"inherit"}}>← Back</button>
-      <h2 style={{margin:"0 0 18px",fontSize:19,fontWeight:800,color:"#38bdf8"}}>Student Portal</h2>
-      <div style={{display:"flex",marginBottom:18,background:"#0a1628",borderRadius:8,padding:3}}>
+      <h2 style={{margin:"0 0 16px",fontSize:18,fontWeight:800,color:"#38bdf8"}}>Student Portal</h2>
+      <div style={{display:"flex",marginBottom:16,background:"#0a1628",borderRadius:8,padding:3}}>
         {["login","register"].map(t=><button key={t} onClick={()=>{setTab(t);setErr("");}}
           style={{flex:1,padding:"6px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:"inherit",
             fontSize:12,fontWeight:700,background:tab===t?"#0c4a6e":"transparent",
             color:tab===t?"#7dd3fc":"#475569"}}>{t==="login"?"Log In":"Register"}</button>)}
       </div>
-      <div style={{marginBottom:12}}>
+      <div style={{marginBottom:11}}>
         <label style={{fontSize:11,color:"#475569",display:"block",marginBottom:4}}>Your Name</label>
         <input value={name} onChange={e=>setName(e.target.value)} placeholder="Enter your full name"
           style={inp} onKeyDown={e=>e.key==="Enter"&&go()}/>
       </div>
-      <div style={{marginBottom:18}}>
+      <div style={{marginBottom:16}}>
         <label style={{fontSize:11,color:"#475569",display:"block",marginBottom:4}}>Your Class</label>
         <div style={{display:"flex",gap:8}}>
           {["jss2","ss2"].map(l=><button key={l} onClick={()=>setLevel(l)}
@@ -251,11 +305,11 @@ function StudentAuth({ users, onLogin, onRegister, onBack }) {
               fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{l.toUpperCase()}</button>)}
         </div>
       </div>
-      {err&&<div style={{fontSize:11,color:"#f87171",marginBottom:12,background:"#1a0505",
+      {err&&<div style={{fontSize:11,color:"#f87171",marginBottom:11,background:"#1a0505",
         padding:"6px 10px",borderRadius:6}}>{err}</div>}
-      <button onClick={go} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",
-        background:"#0284c7",color:"#fff",fontSize:13,fontWeight:800,fontFamily:"inherit"}}>
-        {tab==="login"?"Log In →":"Create Account →"}</button>
+      <button onClick={go} disabled={loading} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",
+        background:loading?"#1e3a5f":"#0284c7",color:"#fff",fontSize:13,fontWeight:800,fontFamily:"inherit"}}>
+        {loading?"Please wait…":tab==="login"?"Log In →":"Create Account →"}</button>
     </div>
   </div>;
 }
@@ -263,94 +317,108 @@ function StudentAuth({ users, onLogin, onRegister, onBack }) {
 // ── Teacher Auth ──────────────────────────────────────────────────────────────
 function TeacherAuth({ onLogin, onBack }) {
   const [pass,setPass]=useState(""); const [err,setErr]=useState("");
-  const BG="#060d1a", PANEL="#0c1628", BORDER="#1e3a5f";
+  const BG="#060d1a",PANEL="#0c1628",BORDER="#1e3a5f";
   const inp={width:"100%",padding:"9px 12px",borderRadius:7,border:`1px solid ${BORDER}`,
-    background:"#0a1628",color:"#e2e8f0",fontSize:13,fontFamily:"inherit",outline:"none"};
-  const go=()=>{ if(pass===TEACHER_PASS) onLogin(); else setErr("Incorrect password."); };
+    background:"#0a1628",color:"#e2e8f0",fontSize:13,fontFamily:"inherit",outline:"none",boxSizing:"border-box"};
   return <div style={{height:"100vh",background:BG,display:"flex",alignItems:"center",
-    justifyContent:"center",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
-    <div style={{background:PANEL,borderRadius:14,border:`1px solid ${BORDER}`,padding:"30px 34px",width:320}}>
+    justifyContent:"center",fontFamily:"'Segoe UI',system-ui,sans-serif",padding:"0 16px"}}>
+    <div style={{background:PANEL,borderRadius:14,border:`1px solid ${BORDER}`,padding:"28px 28px",width:"100%",maxWidth:320}}>
       <button onClick={onBack} style={{background:"none",border:"none",color:"#475569",cursor:"pointer",
         fontSize:12,marginBottom:14,padding:0,fontFamily:"inherit"}}>← Back</button>
-      <h2 style={{margin:"0 0 18px",fontSize:19,fontWeight:800,color:"#38bdf8"}}>Teacher Login</h2>
-      <div style={{marginBottom:16}}>
+      <h2 style={{margin:"0 0 16px",fontSize:18,fontWeight:800,color:"#38bdf8"}}>Teacher Login</h2>
+      <div style={{marginBottom:14}}>
         <label style={{fontSize:11,color:"#475569",display:"block",marginBottom:4}}>Password</label>
         <input type="password" value={pass} onChange={e=>setPass(e.target.value)}
-          placeholder="Enter teacher password" style={inp} onKeyDown={e=>e.key==="Enter"&&go()}/>
+          placeholder="Enter teacher password" style={inp} onKeyDown={e=>e.key==="Enter"&&(pass===TEACHER_PASS?onLogin():setErr("Incorrect password."))}/>
       </div>
-      {err&&<div style={{fontSize:11,color:"#f87171",marginBottom:12}}>{err}</div>}
-      <button onClick={go} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",
-        background:"#0284c7",color:"#fff",fontSize:13,fontWeight:800,fontFamily:"inherit"}}>Enter Dashboard →</button>
+      {err&&<div style={{fontSize:11,color:"#f87171",marginBottom:11}}>{err}</div>}
+      <button onClick={()=>pass===TEACHER_PASS?onLogin():setErr("Incorrect password.")}
+        style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",
+          background:"#0284c7",color:"#fff",fontSize:13,fontWeight:800,fontFamily:"inherit"}}>Enter Dashboard →</button>
     </div>
   </div>;
 }
 
 // ── Teacher Dashboard ─────────────────────────────────────────────────────────
-function TeacherDashboard({ users, customEx, baseEx, onAdd, onDelete, onLogout }) {
+function TeacherDashboard({ onLogout, baseEx }) {
   const [tab,setTab]=useState("students");
   const [filterLvl,setFilterLvl]=useState("all");
+  const [users,setUsers]=useState([]);
+  const [customEx,setCustomEx]=useState({jss2:[],ss2:[]});
+  const [loading,setLoading]=useState(true);
   const [addLvl,setAddLvl]=useState("jss2");
   const [form,setForm]=useState({title:"",desc:"",hint:"",steps:[]});
   const [newStep,setNewStep]=useState({type:"terminal",text:""});
   const [msg,setMsg]=useState("");
-  const BG="#060d1a", PANEL="#0c1628", BORDER="#1e3a5f", MUTED="#2a4a70";
+  const BG="#060d1a",PANEL="#0c1628",BORDER="#1e3a5f",MUTED="#2a4a70";
   const inp={width:"100%",padding:"7px 10px",borderRadius:6,border:`1px solid ${BORDER}`,
-    background:"#0a1628",color:"#e2e8f0",fontSize:12,fontFamily:"inherit",outline:"none"};
+    background:"#0a1628",color:"#e2e8f0",fontSize:12,fontFamily:"inherit",outline:"none",boxSizing:"border-box"};
+
+  useEffect(()=>{
+    (async()=>{
+      const [u,ex]=await Promise.all([dbLoadUsers(),dbLoadCustomEx()]);
+      setUsers(u); setCustomEx(ex); setLoading(false);
+    })();
+  },[]);
 
   const allEx=lvl=>[...(baseEx[lvl]||[]),...(customEx[lvl]||[])];
-
   const getProg=u=>{
     const exs=allEx(u.level);
     const done=exs.filter(e=>u.progress?.[e.id]?.completed).length;
     return {done,total:exs.length,pct:exs.length?Math.round(done/exs.length*100):0};
   };
-
   const filtered=filterLvl==="all"?users:users.filter(u=>u.level===filterLvl);
 
   const addStep=()=>{
-    if (!newStep.text.trim()) return;
+    if(!newStep.text.trim()) return;
     setForm(f=>({...f,steps:[...f.steps,{...newStep}]}));
     setNewStep({type:"terminal",text:""});
   };
-
-  const submit=()=>{
-    if (!form.title.trim()||!form.desc.trim()||form.steps.length<2){setMsg("error");return;}
+  const submit=async()=>{
+    if(!form.title.trim()||!form.desc.trim()||form.steps.length<2){setMsg("error");return;}
     const req={};
     form.steps.forEach(s=>{req[s.type]=(req[s.type]||0)+1;});
-    onAdd(addLvl,{title:form.title.trim(),desc:form.desc.trim(),hint:form.hint.trim(),steps:form.steps,req});
+    const ex={id:`c${Date.now()}`,title:form.title.trim(),desc:form.desc.trim(),
+      hint:form.hint.trim(),steps:form.steps,req};
+    await dbAddCustomEx(addLvl,ex);
+    setCustomEx(prev=>({...prev,[addLvl]:[...(prev[addLvl]||[]),ex]}));
     setForm({title:"",desc:"",hint:"",steps:[]});
     setMsg("ok"); setTimeout(()=>setMsg(""),3000);
   };
+  const handleDelete=async(lvl,id)=>{
+    await dbDeleteCustomEx(id);
+    setCustomEx(prev=>({...prev,[lvl]:prev[lvl].filter(e=>e.id!==id)}));
+  };
 
   const TabBtn=({id,label})=><button onClick={()=>setTab(id)}
-    style={{padding:"5px 14px",borderRadius:6,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,
+    style={{padding:"5px 13px",borderRadius:6,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,
       fontFamily:"inherit",background:tab===id?"#0c4a6e":"transparent",color:tab===id?"#7dd3fc":"#475569"}}>{label}</button>;
 
   return <div style={{height:"100vh",background:BG,color:"#e2e8f0",
     fontFamily:"'Segoe UI',system-ui,sans-serif",display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    {/* Header */}
     <header style={{background:PANEL,borderBottom:`1px solid ${BORDER}`,height:48,
-      display:"flex",alignItems:"center",padding:"0 16px",gap:10,flexShrink:0}}>
-      <span style={{fontSize:15,fontWeight:800,color:"#38bdf8"}}>FlowBuilder</span>
-      <span style={{fontSize:10,color:MUTED,background:"#0c2540",padding:"2px 8px",borderRadius:10,fontWeight:700}}>Teacher</span>
-      <div style={{display:"flex",gap:4,marginLeft:8}}>
+      display:"flex",alignItems:"center",padding:"0 14px",gap:8,flexShrink:0,flexWrap:"wrap"}}>
+      <span style={{fontSize:14,fontWeight:800,color:"#38bdf8"}}>FlowBuilder</span>
+      <span style={{fontSize:10,color:MUTED,background:"#0c2540",padding:"2px 7px",borderRadius:10,fontWeight:700}}>Teacher</span>
+      <div style={{display:"flex",gap:3,marginLeft:6,flexWrap:"wrap"}}>
         <TabBtn id="students" label="👥 Students"/>
         <TabBtn id="exercises" label="📚 Exercises"/>
         <TabBtn id="add" label="➕ Add Exercise"/>
       </div>
-      <button onClick={onLogout} style={{marginLeft:"auto",padding:"3px 12px",borderRadius:5,
+      <button onClick={onLogout} style={{marginLeft:"auto",padding:"3px 10px",borderRadius:5,
         border:`1px solid ${BORDER}`,background:"transparent",color:MUTED,fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>Log out</button>
     </header>
 
-    <div style={{flex:1,overflow:"auto",padding:"18px 22px"}}>
+    <div style={{flex:1,overflow:"auto",padding:"16px 18px"}}>
+      {loading&&<div style={{color:MUTED,textAlign:"center",padding:"40px 0",fontSize:13}}>Loading students…</div>}
 
-      {/* Students tab */}
-      {tab==="students"&&<div>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
-          <h2 style={{margin:0,fontSize:15,fontWeight:800,color:"#f1f5f9"}}>Students ({filtered.length})</h2>
-          <div style={{display:"flex",gap:5}}>
+      {/* Students */}
+      {!loading&&tab==="students"&&<div>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:13,flexWrap:"wrap"}}>
+          <h2 style={{margin:0,fontSize:14,fontWeight:800,color:"#f1f5f9"}}>Students ({filtered.length})</h2>
+          <div style={{display:"flex",gap:4}}>
             {["all","jss2","ss2"].map(l=><button key={l} onClick={()=>setFilterLvl(l)}
-              style={{padding:"2px 11px",borderRadius:10,border:`1px solid ${filterLvl===l?"#38bdf8":BORDER}`,
+              style={{padding:"2px 10px",borderRadius:10,border:`1px solid ${filterLvl===l?"#38bdf8":BORDER}`,
                 background:filterLvl===l?"#0c4a6e":"transparent",color:filterLvl===l?"#38bdf8":"#475569",
                 fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
               {l==="all"?"All":l.toUpperCase()}</button>)}
@@ -358,33 +426,34 @@ function TeacherDashboard({ users, customEx, baseEx, onAdd, onDelete, onLogout }
         </div>
         {filtered.length===0
           ? <div style={{color:MUTED,fontSize:13,textAlign:"center",padding:"40px 0"}}>No students registered yet.</div>
-          : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))",gap:10}}>
+          : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:9}}>
             {filtered.map(u=>{
               const p=getProg(u);
               const exs=allEx(u.level);
-              return <div key={u.id} style={{background:PANEL,borderRadius:10,border:`1px solid ${BORDER}`,padding:"13px 15px"}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:9}}>
-                  <div style={{width:30,height:30,borderRadius:"50%",background:"#0c4a6e",display:"flex",
-                    alignItems:"center",justifyContent:"center",fontSize:13,color:"#7dd3fc",fontWeight:800,flexShrink:0}}>
+              return <div key={u.id} style={{background:PANEL,borderRadius:10,border:`1px solid ${BORDER}`,padding:"12px 14px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                  <div style={{width:28,height:28,borderRadius:"50%",background:"#0c4a6e",display:"flex",
+                    alignItems:"center",justifyContent:"center",fontSize:12,color:"#7dd3fc",fontWeight:800,flexShrink:0}}>
                     {u.name[0].toUpperCase()}</div>
-                  <div><div style={{fontSize:13,fontWeight:700,color:"#f1f5f9"}}>{u.name}</div>
-                    <div style={{fontSize:10,color:MUTED,fontWeight:600}}>{u.level.toUpperCase()}</div></div>
-                  <div style={{marginLeft:"auto",fontSize:13,fontWeight:800,
-                    color:p.pct===100?"#4ade80":p.pct>50?"#fbbf24":"#60a5fa"}}>{p.pct}%</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{u.name}</div>
+                    <div style={{fontSize:10,color:MUTED,fontWeight:600}}>{u.level.toUpperCase()}</div>
+                  </div>
+                  <div style={{fontSize:13,fontWeight:800,color:p.pct===100?"#4ade80":p.pct>50?"#fbbf24":"#60a5fa",flexShrink:0}}>{p.pct}%</div>
                 </div>
-                <div style={{height:5,background:"#1e3a5f",borderRadius:3,overflow:"hidden",marginBottom:7}}>
+                <div style={{height:5,background:"#1e3a5f",borderRadius:3,overflow:"hidden",marginBottom:6}}>
                   <div style={{width:`${p.pct}%`,height:"100%",borderRadius:3,
                     background:p.pct===100?"#34d399":p.pct>50?"#fbbf24":"#60a5fa",transition:"width .5s"}}/></div>
-                <div style={{fontSize:10,color:MUTED,marginBottom:8}}>{p.done} / {p.total} completed</div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:7}}>{p.done} / {p.total} completed</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
                   {exs.map(ex=>{
                     const done=u.progress?.[ex.id]?.completed;
                     const att=u.progress?.[ex.id]?.attempts||0;
                     return <div key={ex.id} title={`${ex.title}${att?" · "+att+" attempt(s)":""}`}
-                      style={{fontSize:9,padding:"2px 6px",borderRadius:6,fontWeight:700,
+                      style={{fontSize:9,padding:"2px 5px",borderRadius:5,fontWeight:700,
                         background:done?"#052e16":"#0a1628",color:done?"#4ade80":"#1e3a5f",
                         border:`1px solid ${done?"#16a34a":"#172333"}`}}>
-                      {done?"✓ ":""}{ex.title.length>12?ex.title.slice(0,10)+"…":ex.title}</div>;
+                      {done?"✓ ":""}{ex.title.length>11?ex.title.slice(0,9)+"…":ex.title}</div>;
                   })}
                 </div>
               </div>;
@@ -392,24 +461,25 @@ function TeacherDashboard({ users, customEx, baseEx, onAdd, onDelete, onLogout }
           </div>}
       </div>}
 
-      {/* Exercises tab */}
-      {tab==="exercises"&&<div>
-        <h2 style={{margin:"0 0 14px",fontSize:15,fontWeight:800,color:"#f1f5f9"}}>All Exercises</h2>
-        {["jss2","ss2"].map(lvl=><div key={lvl} style={{marginBottom:22}}>
-          <h3 style={{margin:"0 0 8px",fontSize:12,fontWeight:800,color:MUTED,textTransform:"uppercase",letterSpacing:1}}>{lvl.toUpperCase()}</h3>
-          <div style={{display:"flex",flexDirection:"column",gap:5}}>
+      {/* Exercises */}
+      {!loading&&tab==="exercises"&&<div>
+        <h2 style={{margin:"0 0 13px",fontSize:14,fontWeight:800,color:"#f1f5f9"}}>All Exercises</h2>
+        {["jss2","ss2"].map(lvl=><div key={lvl} style={{marginBottom:20}}>
+          <h3 style={{margin:"0 0 7px",fontSize:11,fontWeight:800,color:MUTED,textTransform:"uppercase",letterSpacing:1}}>{lvl.toUpperCase()}</h3>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
             {allEx(lvl).map((ex,i)=>{
               const isCustom=!baseEx[lvl].find(b=>b.id===ex.id);
-              return <div key={ex.id} style={{display:"flex",alignItems:"center",gap:10,
-                background:PANEL,borderRadius:8,padding:"9px 13px",border:`1px solid ${BORDER}`}}>
-                <span style={{fontSize:10,color:MUTED,minWidth:18}}>{i+1}.</span>
-                <div style={{flex:1}}>
+              return <div key={ex.id} style={{display:"flex",alignItems:"center",gap:8,
+                background:PANEL,borderRadius:7,padding:"8px 12px",border:`1px solid ${BORDER}`}}>
+                <span style={{fontSize:10,color:MUTED,minWidth:16}}>{i+1}.</span>
+                <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9"}}>{ex.title}</div>
-                  <div style={{fontSize:11,color:"#475569"}}>{ex.desc}</div></div>
+                  <div style={{fontSize:10,color:"#475569",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{ex.desc}</div>
+                </div>
                 {isCustom&&<>
-                  <span style={{fontSize:9,background:"#1e1b4b",color:"#a5b4fc",padding:"2px 6px",borderRadius:6,fontWeight:700}}>Custom</span>
-                  <button onClick={()=>onDelete(lvl,ex.id)} style={{padding:"2px 8px",borderRadius:5,border:"none",
-                    cursor:"pointer",background:"#3f0707",color:"#f87171",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>Delete</button>
+                  <span style={{fontSize:9,background:"#1e1b4b",color:"#a5b4fc",padding:"2px 5px",borderRadius:5,fontWeight:700,flexShrink:0}}>Custom</span>
+                  <button onClick={()=>handleDelete(lvl,ex.id)} style={{padding:"2px 7px",borderRadius:4,border:"none",
+                    cursor:"pointer",background:"#3f0707",color:"#f87171",fontSize:10,fontWeight:700,fontFamily:"inherit",flexShrink:0}}>Delete</button>
                 </>}
               </div>;
             })}
@@ -417,17 +487,17 @@ function TeacherDashboard({ users, customEx, baseEx, onAdd, onDelete, onLogout }
         </div>)}
       </div>}
 
-      {/* Add exercise tab */}
-      {tab==="add"&&<div style={{maxWidth:580}}>
-        <h2 style={{margin:"0 0 14px",fontSize:15,fontWeight:800,color:"#f1f5f9"}}>Add New Exercise</h2>
-        <div style={{display:"flex",gap:7,marginBottom:14}}>
+      {/* Add Exercise */}
+      {!loading&&tab==="add"&&<div style={{maxWidth:560}}>
+        <h2 style={{margin:"0 0 13px",fontSize:14,fontWeight:800,color:"#f1f5f9"}}>Add New Exercise</h2>
+        <div style={{display:"flex",gap:6,marginBottom:13}}>
           {["jss2","ss2"].map(l=><button key={l} onClick={()=>setAddLvl(l)}
-            style={{padding:"5px 18px",borderRadius:7,border:`1.5px solid ${addLvl===l?"#38bdf8":BORDER}`,
+            style={{padding:"5px 16px",borderRadius:7,border:`1.5px solid ${addLvl===l?"#38bdf8":BORDER}`,
               background:addLvl===l?"#0c4a6e":"transparent",color:addLvl===l?"#38bdf8":"#475569",
               fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{l.toUpperCase()}</button>)}
         </div>
         {[["Title *","title","e.g. Swap Two Variables"],["Description *","desc","What the student needs to do"],["Hint (optional)","hint","A helpful clue"]].map(([label,key,ph])=>(
-          <div key={key} style={{marginBottom:10}}>
+          <div key={key} style={{marginBottom:9}}>
             <label style={{fontSize:11,color:"#475569",display:"block",marginBottom:3}}>{label}</label>
             {key==="desc"
               ? <textarea value={form[key]} onChange={e=>setForm(f=>({...f,[key]:e.target.value}))}
@@ -435,23 +505,23 @@ function TeacherDashboard({ users, customEx, baseEx, onAdd, onDelete, onLogout }
               : <input value={form[key]} onChange={e=>setForm(f=>({...f,[key]:e.target.value}))} placeholder={ph} style={inp}/>}
           </div>
         ))}
-        <div style={{marginBottom:12}}>
-          <label style={{fontSize:11,color:"#475569",display:"block",marginBottom:6}}>Solution Steps * (add in order)</label>
-          <div style={{display:"flex",gap:5,marginBottom:5}}>
+        <div style={{marginBottom:11}}>
+          <label style={{fontSize:11,color:"#475569",display:"block",marginBottom:5}}>Solution Steps * (add in order)</label>
+          <div style={{display:"flex",gap:4,marginBottom:5,flexWrap:"wrap"}}>
             <select value={newStep.type} onChange={e=>setNewStep(s=>({...s,type:e.target.value}))} style={{...inp,width:130}}>
               {SYM_ORDER.map(t=><option key={t} value={t}>{SYM[t].label}</option>)}
             </select>
             <input value={newStep.text} onChange={e=>setNewStep(s=>({...s,text:e.target.value}))}
-              placeholder="Step label" style={{...inp,flex:1}} onKeyDown={e=>e.key==="Enter"&&addStep()}/>
-            <button onClick={addStep} style={{padding:"7px 12px",borderRadius:6,border:"none",cursor:"pointer",
+              placeholder="Step label" style={{...inp,flex:1,minWidth:100}} onKeyDown={e=>e.key==="Enter"&&addStep()}/>
+            <button onClick={addStep} style={{padding:"7px 11px",borderRadius:5,border:"none",cursor:"pointer",
               background:"#0369a1",color:"#fff",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>+ Add</button>
           </div>
-          {form.steps.length>0&&<div style={{background:"#0a1628",borderRadius:8,padding:"7px 9px",
-            border:`1px solid ${BORDER}`,maxHeight:170,overflowY:"auto"}}>
-            {form.steps.map((s,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:7,padding:"3px 0",
+          {form.steps.length>0&&<div style={{background:"#0a1628",borderRadius:7,padding:"6px 8px",
+            border:`1px solid ${BORDER}`,maxHeight:160,overflowY:"auto"}}>
+            {form.steps.map((s,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"3px 0",
               borderBottom:i<form.steps.length-1?"1px solid #1e293b":"none"}}>
-              <span style={{fontSize:10,color:MUTED,minWidth:16}}>{i+1}.</span>
-              <span style={{fontSize:9,padding:"2px 7px",borderRadius:4,fontWeight:700,
+              <span style={{fontSize:10,color:MUTED,minWidth:14}}>{i+1}.</span>
+              <span style={{fontSize:9,padding:"2px 6px",borderRadius:4,fontWeight:700,
                 background:`${SYM[s.type].fill}22`,color:SYM[s.type].fill}}>{SYM[s.type].label}</span>
               <span style={{fontSize:11,color:"#94a3b8",flex:1}}>{s.text}</span>
               <button onClick={()=>setForm(f=>({...f,steps:f.steps.filter((_,j)=>j!==i)}))}
@@ -459,9 +529,9 @@ function TeacherDashboard({ users, customEx, baseEx, onAdd, onDelete, onLogout }
             </div>)}
           </div>}
         </div>
-        {msg==="error"&&<div style={{fontSize:11,color:"#f87171",marginBottom:10,background:"#1a0505",padding:"6px 10px",borderRadius:6}}>Fill in Title, Description and add at least 2 steps.</div>}
-        {msg==="ok"&&<div style={{fontSize:11,color:"#4ade80",marginBottom:10,background:"#052e16",padding:"6px 10px",borderRadius:6}}>✓ Exercise added!</div>}
-        <button onClick={submit} style={{padding:"9px 22px",borderRadius:8,border:"none",cursor:"pointer",
+        {msg==="error"&&<div style={{fontSize:11,color:"#f87171",marginBottom:9,background:"#1a0505",padding:"6px 10px",borderRadius:6}}>Fill in Title, Description and at least 2 steps.</div>}
+        {msg==="ok"&&<div style={{fontSize:11,color:"#4ade80",marginBottom:9,background:"#052e16",padding:"6px 10px",borderRadius:6}}>✓ Exercise added successfully!</div>}
+        <button onClick={submit} style={{padding:"9px 20px",borderRadius:7,border:"none",cursor:"pointer",
           background:"#15803d",color:"#fff",fontSize:13,fontWeight:800,fontFamily:"inherit"}}>Save Exercise →</button>
       </div>}
     </div>
@@ -471,7 +541,6 @@ function TeacherDashboard({ users, customEx, baseEx, onAdd, onDelete, onLogout }
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [screen,setScreen]=useState("landing");
-  const [users,setUsers]=useState([]);
   const [customEx,setCustomEx]=useState({jss2:[],ss2:[]});
   const [loaded,setLoaded]=useState(false);
   const [currentUser,setCurrentUser]=useState(null);
@@ -490,6 +559,8 @@ export default function App() {
   const [feedback,setFeedback]=useState(null);
   const [showTips,setShowTips]=useState(false);
   const [tips,setTips]=useState([]);
+  // Mobile tap-to-place
+  const [tapType,setTapType]=useState(null);
 
   const canvasRef=useRef(null);
   const dragType=useRef(null);
@@ -497,10 +568,7 @@ export default function App() {
   const didMove=useRef(false);
 
   useEffect(()=>{
-    (async()=>{
-      const [u,ex]=await Promise.all([loadUsers(),loadCustomEx()]);
-      setUsers(u); setCustomEx(ex); setLoaded(true);
-    })();
+    dbLoadCustomEx().then(ex=>{setCustomEx(ex);setLoaded(true);});
   },[]);
 
   const allEx=useCallback(lvl=>[...BASE[lvl],...(customEx[lvl]||[])],[customEx]);
@@ -509,16 +577,13 @@ export default function App() {
   useEffect(()=>{
     setNodes([]); setConns([]);
     setHistory([{nodes:[],conns:[]}]); setHistIdx(0);
-    setSelNode(null); setCfrom(null);
+    setSelNode(null); setCfrom(null); setTapType(null);
     setFeedback(null); setShowTips(false);
     setEditing(null); setMode("move");
   },[cIdx, currentUser?.id]);
 
   const pushHist=useCallback((nn,nc)=>{
-    setHistory(h=>{
-      const base=h.slice(0,histIdx+1);
-      return [...base,{nodes:nn,conns:nc}].slice(-MAX_HIST);
-    });
+    setHistory(h=>[...h.slice(0,histIdx+1),{nodes:nn,conns:nc}].slice(-MAX_HIST));
     setHistIdx(i=>Math.min(i+1,MAX_HIST-1));
   },[histIdx]);
 
@@ -543,31 +608,41 @@ export default function App() {
     return ()=>window.removeEventListener("keydown",k);
   },[undo,redo]);
 
-  const saveProgress=useCallback((userId,exId,isComplete)=>{
-    setUsers(prev=>{
-      const updated=prev.map(u=>{
-        if(u.id!==userId) return u;
-        const ex=u.progress?.[exId]||{};
-        const progress={...u.progress,[exId]:{
-          ...ex,
-          attempts:(ex.attempts||0)+1,
-          lastAttempt:Date.now(),
-          ...(isComplete?{completed:true,completedAt:Date.now()}:{})
-        }};
-        return {...u,progress};
-      });
-      saveUsers(updated);
-      // Update currentUser too
-      const updatedCurrent=updated.find(u=>u.id===userId);
-      if(updatedCurrent) setCurrentUser(updatedCurrent);
-      return updated;
+  const saveProgress=useCallback(async(userId,exId,isComplete)=>{
+    setCurrentUser(prev=>{
+      if(!prev||prev.id!==userId) return prev;
+      const ex=prev.progress?.[exId]||{};
+      const updated={...ex,attempts:(ex.attempts||0)+1,lastAttempt:Date.now(),
+        ...(isComplete&&!ex.completed?{completed:true,completedAt:Date.now()}:{})};
+      dbSaveProgress(userId,exId,updated);
+      return {...prev,progress:{...prev.progress,[exId]:updated}};
     });
   },[]);
 
+  // ── Desktop drag from palette ────────────────────────────────────────────
   const palDragStart=useCallback((e,type)=>{
     dragType.current=type; e.dataTransfer.effectAllowed="copy";
+    setTapType(null);
   },[]);
 
+  // ── Mobile tap-to-place ──────────────────────────────────────────────────
+  const palTap=useCallback((type)=>{
+    setTapType(p=>p===type?null:type);
+  },[]);
+
+  const placeOnCanvas=useCallback((clientX,clientY)=>{
+    if(!tapType||!canvasRef.current) return false;
+    const r=canvasRef.current.getBoundingClientRect();
+    if(clientX<r.left||clientX>r.right||clientY<r.top||clientY>r.bottom) return false;
+    const x=snap(Math.max(0,clientX-r.left-W(tapType)/2));
+    const y=snap(Math.max(0,clientY-r.top-H(tapType)/2));
+    const nn=[...nodes,{id:uid(),type:tapType,text:DEF_TEXT[tapType],x,y}];
+    setNodes(nn); pushHist(nn,conns);
+    setTapType(null);
+    return true;
+  },[tapType,nodes,conns,pushHist]);
+
+  // ── Desktop drop ─────────────────────────────────────────────────────────
   const canvasDrop=useCallback(e=>{
     e.preventDefault();
     const type=dragType.current;
@@ -580,6 +655,7 @@ export default function App() {
     dragType.current=null;
   },[nodes,conns,pushHist]);
 
+  // ── Mouse drag (desktop node move) ───────────────────────────────────────
   const nodeMouseDown=useCallback((e,id)=>{
     if(mode!=="move") return;
     e.stopPropagation(); didMove.current=false;
@@ -602,17 +678,61 @@ export default function App() {
   const canvasMouseUp=useCallback(()=>{
     if(dragNode.current&&didMove.current){
       setNodes(ns=>{
-        const snapped=ns.map(n=>n.id===dragNode.current.id?{...n,x:snap(n.x),y:snap(n.y)}:n);
-        pushHist(snapped,conns);
-        return snapped;
+        const sn=ns.map(n=>n.id===dragNode.current.id?{...n,x:snap(n.x),y:snap(n.y)}:n);
+        pushHist(sn,conns); return sn;
       });
     }
     dragNode.current=null;
   },[conns,pushHist]);
 
+  // ── Touch drag (mobile node move) ────────────────────────────────────────
+  const nodeTouchStart=useCallback((e,id)=>{
+    // If tap-to-place active, let the canvas tap handler deal with it
+    if(tapType) return;
+    if(mode!=="move") return;
+    e.stopPropagation();
+    const touch=e.touches[0];
+    const nd=nodes.find(n=>n.id===id);
+    if(!nd||!canvasRef.current) return;
+    const r=canvasRef.current.getBoundingClientRect();
+    dragNode.current={id,ox:touch.clientX-r.left-nd.x,oy:touch.clientY-r.top-nd.y};
+    didMove.current=false;
+    setSelNode(id);
+  },[mode,nodes,tapType]);
+
+  const canvasTouchMove=useCallback(e=>{
+    if(!dragNode.current||!canvasRef.current) return;
+    e.preventDefault();
+    didMove.current=true;
+    const touch=e.touches[0];
+    const r=canvasRef.current.getBoundingClientRect();
+    const x=Math.max(0,touch.clientX-r.left-dragNode.current.ox);
+    const y=Math.max(0,touch.clientY-r.top-dragNode.current.oy);
+    setNodes(ns=>ns.map(n=>n.id===dragNode.current.id?{...n,x,y}:n));
+  },[]);
+
+  const canvasTouchEnd=useCallback(e=>{
+    // tap-to-place
+    if(tapType){
+      const touch=e.changedTouches[0];
+      placeOnCanvas(touch.clientX,touch.clientY);
+      return;
+    }
+    if(dragNode.current&&didMove.current){
+      setNodes(ns=>{
+        const sn=ns.map(n=>n.id===dragNode.current.id?{...n,x:snap(n.x),y:snap(n.y)}:n);
+        pushHist(sn,conns); return sn;
+      });
+    }
+    dragNode.current=null;
+  },[tapType,placeOnCanvas,conns,pushHist]);
+
+  // ── Click handlers ───────────────────────────────────────────────────────
   const nodeClick=useCallback((e,id)=>{
     e.stopPropagation();
     if(didMove.current){didMove.current=false;return;}
+    // tap-to-place: clicking a node while placing — ignore, don't place on top
+    if(tapType) return;
     if(mode==="delete"){
       const nn=nodes.filter(n=>n.id!==id);
       const nc=conns.filter(c=>c.from!==id&&c.to!==id);
@@ -632,7 +752,16 @@ export default function App() {
       return;
     }
     setSelNode(p=>p===id?null:id);
-  },[mode,cfrom,conns,nodes,selNode,pushHist]);
+  },[mode,cfrom,conns,nodes,selNode,tapType,pushHist]);
+
+  const canvasClick=useCallback((e)=>{
+    if(tapType){
+      placeOnCanvas(e.clientX,e.clientY);
+      return;
+    }
+    if(mode==="connect"){setCfrom(null);return;}
+    setSelNode(null);
+  },[mode,tapType,placeOnCanvas]);
 
   const nodeDbl=useCallback((e,id)=>{
     e.stopPropagation();
@@ -673,11 +802,11 @@ export default function App() {
     if(!ch||!currentUser) return;
     const t=getTips(nodes,conns,ch);
     setTips(t); setShowTips(true);
-    const isOk=t[0].sev==="ok"||t.every(x=>x.sev!=="error");
+    const isOk=t.every(x=>x.sev!=="error");
     saveProgress(currentUser.id,ch.id,isOk);
     setFeedback(isOk
-      ?{ok:true,msg:"✓ Excellent! Exercise marked as complete. See Solution to compare your layout."}
-      :{ok:false,msg:`Found ${t.filter(x=>x.sev==="error").length} issue(s). See correction tips below ↓`});
+      ?{ok:true,msg:"✓ Excellent! Exercise marked as complete."}
+      :{ok:false,msg:`Found ${t.filter(x=>x.sev==="error").length} issue(s) — see correction tips below ↓`});
   },[nodes,conns,ch,currentUser,saveProgress]);
 
   const BG="#060d1a",PANEL="#0c1628",BORDER="#1e3a5f",MUTED="#2a4a70";
@@ -685,29 +814,10 @@ export default function App() {
   if(!loaded) return <div style={{height:"100vh",background:BG,display:"flex",alignItems:"center",
     justifyContent:"center",color:"#38bdf8",fontSize:15,fontFamily:"sans-serif"}}>Loading…</div>;
 
-  if(screen==="landing") return <Landing onStudent={()=>setScreen("studentAuth")} onTeacher={()=>setScreen("teacherAuth")}/>;
-
-  if(screen==="studentAuth") return <StudentAuth users={users}
-    onLogin={u=>{setCurrentUser(u);setCIdx(0);setScreen("student");}}
-    onRegister={(name,level)=>{
-      const u={id:`u${Date.now()}`,name,level,createdAt:Date.now(),progress:{}};
-      const updated=[...users,u]; setUsers(updated); saveUsers(updated);
-      setCurrentUser(u); setCIdx(0); setScreen("student");
-    }}
-    onBack={()=>setScreen("landing")}/>;
-
-  if(screen==="teacherAuth") return <TeacherAuth onLogin={()=>setScreen("teacher")} onBack={()=>setScreen("landing")}/>;
-
-  if(screen==="teacher") return <TeacherDashboard users={users} customEx={customEx} baseEx={BASE}
-    onAdd={(lvl,ex)=>{
-      const updated={...customEx,[lvl]:[...(customEx[lvl]||[]),{...ex,id:`c${Date.now()}`}]};
-      setCustomEx(updated); saveCustomEx(updated);
-    }}
-    onDelete={(lvl,id)=>{
-      const updated={...customEx,[lvl]:customEx[lvl].filter(e=>e.id!==id)};
-      setCustomEx(updated); saveCustomEx(updated);
-    }}
-    onLogout={()=>setScreen("landing")}/>;
+  if(screen==="landing")      return <Landing onStudent={()=>setScreen("studentAuth")} onTeacher={()=>setScreen("teacherAuth")}/>;
+  if(screen==="studentAuth")  return <StudentAuth onLogin={u=>{setCurrentUser(u);setCIdx(0);setScreen("student");}} onBack={()=>setScreen("landing")}/>;
+  if(screen==="teacherAuth")  return <TeacherAuth onLogin={()=>setScreen("teacher")} onBack={()=>setScreen("landing")}/>;
+  if(screen==="teacher")      return <TeacherDashboard baseEx={BASE} onLogout={()=>setScreen("landing")}/>;
 
   // ── Student Builder ────────────────────────────────────────────────────────
   if(screen==="student"&&currentUser&&ch){
@@ -717,59 +827,58 @@ export default function App() {
     const pct=Math.round(completed/exList.length*100);
 
     return <div style={{display:"flex",flexDirection:"column",height:"100vh",background:BG,
-      color:"#e2e8f0",fontFamily:"'Segoe UI',system-ui,sans-serif",overflow:"hidden"}}>
+      color:"#e2e8f0",fontFamily:"'Segoe UI',system-ui,sans-serif",overflow:"hidden",
+      touchAction:"none"}}>
 
       {/* Header */}
-      <header style={{background:PANEL,borderBottom:`1px solid ${BORDER}`,height:48,
-        display:"flex",alignItems:"center",padding:"0 14px",gap:10,flexShrink:0}}>
-        <svg width="18" height="18" viewBox="0 0 22 22" fill="none">
-          <rect x="1" y="6" width="20" height="10" rx="2" fill="#0ea5e9" opacity=".2" stroke="#38bdf8" strokeWidth="1.4"/>
-          <circle cx="11" cy="11" r="2" fill="#38bdf8"/>
-          <path d="M11 2v4M11 16v4M2 11h4M16 11h4" stroke="#38bdf8" strokeWidth="1.4" strokeLinecap="round"/>
-        </svg>
+      <header style={{background:PANEL,borderBottom:`1px solid ${BORDER}`,minHeight:46,
+        display:"flex",alignItems:"center",padding:"0 12px",gap:8,flexShrink:0,flexWrap:"wrap"}}>
         <span style={{fontSize:14,fontWeight:800,color:"#38bdf8"}}>FlowBuilder</span>
         <div style={{width:1,height:16,background:BORDER}}/>
         <span style={{fontSize:12,color:"#7dd3fc",fontWeight:700}}>{currentUser.name}</span>
-        <span style={{fontSize:10,color:MUTED,background:"#0c3554",padding:"2px 8px",borderRadius:10,fontWeight:700}}>
+        <span style={{fontSize:10,color:MUTED,background:"#0c3554",padding:"2px 7px",borderRadius:10,fontWeight:700}}>
           {currentUser.level.toUpperCase()}</span>
-        {/* Progress bar */}
-        <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:4}}>
+        <div style={{display:"flex",alignItems:"center",gap:5}}>
           <span style={{fontSize:10,color:MUTED,fontWeight:600}}>Progress:</span>
-          <div style={{width:90,height:5,background:"#1e3a5f",borderRadius:3,overflow:"hidden"}}>
+          <div style={{width:72,height:5,background:"#1e3a5f",borderRadius:3,overflow:"hidden"}}>
             <div style={{width:`${pct}%`,height:"100%",background:"#34d399",borderRadius:3,transition:"width .5s"}}/></div>
           <span style={{fontSize:10,color:"#34d399",fontWeight:700}}>{pct}%</span>
           <span style={{fontSize:10,color:MUTED}}>{completed}/{exList.length}</span>
         </div>
-        <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
-          <span style={{fontSize:9,color:MUTED}}>Double-click to rename · Ctrl+Z undo · Ctrl+Y redo</span>
-          <button onClick={()=>{setCurrentUser(null);setScreen("landing");}}
-            style={{padding:"3px 10px",borderRadius:5,border:`1px solid ${BORDER}`,background:"transparent",
-              color:MUTED,fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>Log out</button>
-        </div>
+        <button onClick={()=>{setCurrentUser(null);setScreen("landing");}} style={{marginLeft:"auto",
+          padding:"3px 9px",borderRadius:5,border:`1px solid ${BORDER}`,background:"transparent",
+          color:MUTED,fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>Log out</button>
       </header>
 
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
         {/* Sidebar */}
-        <aside style={{width:182,background:PANEL,borderRight:`1px solid ${BORDER}`,
+        <aside style={{width:176,background:PANEL,borderRight:`1px solid ${BORDER}`,
           display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0}}>
-          <div style={{padding:"10px 10px 8px",borderBottom:`1px solid ${BORDER}`}}>
-            <div style={{fontSize:9,fontWeight:800,color:MUTED,textTransform:"uppercase",letterSpacing:1.2,marginBottom:7}}>
-              Symbols — drag to canvas</div>
-            {SYM_ORDER.map(type=><PaletteItem key={type} type={type} onDragStart={palDragStart}/>)}
+          <div style={{padding:"9px 9px 7px",borderBottom:`1px solid ${BORDER}`}}>
+            <div style={{fontSize:9,fontWeight:800,color:MUTED,textTransform:"uppercase",letterSpacing:1.1,marginBottom:6}}>
+              {tapType?`Tap canvas to place ${SYM[tapType].label} ↓`:"Tap a symbol to place it"}</div>
+            {tapType&&<div style={{fontSize:9,color:"#fbbf24",marginBottom:6,fontWeight:600}}>
+              Tap again to cancel · Tap canvas to place</div>}
+            {SYM_ORDER.map(type=>(
+              <div key={type} style={{outline:tapType===type?`2px solid #f97316`:"none",borderRadius:4,marginBottom:7}}>
+                <PaletteItem type={type} onDragStart={palDragStart} onTap={palTap}/>
+              </div>
+            ))}
           </div>
-          <div style={{flex:1,overflowY:"auto",padding:"8px 7px"}}>
-            <div style={{fontSize:9,fontWeight:800,color:MUTED,textTransform:"uppercase",letterSpacing:1.2,marginBottom:7,padding:"0 3px"}}>
+          <div style={{flex:1,overflowY:"auto",padding:"8px 6px"}}>
+            <div style={{fontSize:9,fontWeight:800,color:MUTED,textTransform:"uppercase",letterSpacing:1.1,marginBottom:6,padding:"0 3px"}}>
               {currentUser.level.toUpperCase()} Exercises</div>
             {exList.map((c,i)=>{
               const done=progress[c.id]?.completed;
               return <button key={c.id} onClick={()=>setCIdx(i)}
-                style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",
-                  padding:"7px 9px",borderRadius:6,border:`1px solid ${cIdx===i?"#1d5f8a":"#172333"}`,
+                style={{display:"flex",alignItems:"center",gap:5,width:"100%",textAlign:"left",
+                  padding:"7px 8px",borderRadius:6,border:`1px solid ${cIdx===i?"#1d5f8a":"#172333"}`,
                   background:cIdx===i?"#0c3554":"transparent",
                   color:cIdx===i?"#7dd3fc":done?"#4ade80":"#4a6280",
-                  fontSize:11,fontWeight:cIdx===i?700:500,cursor:"pointer",marginBottom:3,fontFamily:"inherit"}}>
+                  fontSize:11,fontWeight:cIdx===i?700:500,cursor:"pointer",marginBottom:3,fontFamily:"inherit",
+                  WebkitTapHighlightColor:"transparent"}}>
                 <span style={{flex:1}}>{c.title}</span>
-                {done&&<span style={{fontSize:12}}>✅</span>}
+                {done&&<span>✅</span>}
               </button>;
             })}
           </div>
@@ -778,58 +887,61 @@ export default function App() {
         {/* Main */}
         <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
           {/* Challenge info */}
-          <div style={{background:"#09141f",padding:"7px 14px",borderBottom:`1px solid ${BORDER}`,flexShrink:0}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:2}}>
+          <div style={{background:"#09141f",padding:"6px 13px",borderBottom:`1px solid ${BORDER}`,flexShrink:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:1}}>
               <span style={{fontWeight:800,fontSize:13,color:"#f1f5f9"}}>{ch.title}</span>
-              {progress[ch.id]?.completed&&<span style={{fontSize:10,background:"#052e16",color:"#4ade80",
-                padding:"1px 8px",borderRadius:10,fontWeight:700}}>✓ Completed</span>}
+              {progress[ch.id]?.completed&&<span style={{fontSize:9,background:"#052e16",color:"#4ade80",
+                padding:"1px 7px",borderRadius:9,fontWeight:700}}>✓ Completed</span>}
             </div>
             <div style={{fontSize:11,color:"#94a3b8"}}>{ch.desc}</div>
             <div style={{fontSize:10,color:MUTED}}>💡 {ch.hint}</div>
           </div>
 
           {/* Toolbar */}
-          <div style={{background:BG,padding:"5px 11px",display:"flex",gap:4,alignItems:"center",
+          <div style={{background:BG,padding:"5px 10px",display:"flex",gap:4,alignItems:"center",
             borderBottom:"1px solid #0f1f35",flexShrink:0,flexWrap:"wrap"}}>
             {[["move","✋","Move"],["connect","🔗","Connect"],["delete","✕","Delete"]].map(([m,icon,lbl])=>(
-              <button key={m} onClick={()=>{setMode(m);setCfrom(null);}}
-                style={{padding:"3px 9px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit",
+              <button key={m} onClick={()=>{setMode(m);setCfrom(null);setTapType(null);}}
+                style={{padding:"4px 9px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit",
+                  WebkitTapHighlightColor:"transparent",
                   background:mode===m?(m==="delete"?"#7f1d1d":"#075985"):(m==="delete"?"#180a0a":"#172333"),
                   color:mode===m?(m==="delete"?"#fca5a5":"#fff"):(m==="delete"?"#ef4444":"#4a6280")}}>
                 {icon} {lbl}</button>
             ))}
             <div style={{width:1,height:16,background:BORDER,margin:"0 1px"}}/>
-            <button onClick={undo} disabled={histIdx<=0} title="Ctrl+Z"
-              style={{padding:"3px 8px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,
-                fontFamily:"inherit",background:"#172333",color:histIdx<=0?"#2a3a4a":"#7dd3fc",opacity:histIdx<=0?.4:1}}>↩ Undo</button>
-            <button onClick={redo} disabled={histIdx>=history.length-1} title="Ctrl+Y"
-              style={{padding:"3px 8px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,
+            <button onClick={undo} disabled={histIdx<=0}
+              style={{padding:"4px 8px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,
+                fontFamily:"inherit",background:"#172333",color:histIdx<=0?"#2a3a4a":"#7dd3fc",
+                opacity:histIdx<=0?.4:1,WebkitTapHighlightColor:"transparent"}}>↩</button>
+            <button onClick={redo} disabled={histIdx>=history.length-1}
+              style={{padding:"4px 8px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,
                 fontFamily:"inherit",background:"#172333",color:histIdx>=history.length-1?"#2a3a4a":"#7dd3fc",
-                opacity:histIdx>=history.length-1?.4:1}}>↪ Redo</button>
-            <div style={{width:1,height:16,background:BORDER,margin:"0 1px"}}/>
-            <button onClick={()=>{setNodes([]);setConns([]);setHistory([{nodes:[],conns:[]}]);setHistIdx(0);setFeedback(null);setShowTips(false);}}
-              style={{padding:"3px 8px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit",background:"#172333",color:"#4a6280"}}>🧹 Clear</button>
+                opacity:histIdx>=history.length-1?.4:1,WebkitTapHighlightColor:"transparent"}}>↪</button>
+            <button onClick={()=>{setNodes([]);setConns([]);setHistory([{nodes:[],conns:[]}]);setHistIdx(0);setFeedback(null);setShowTips(false);setTapType(null);}}
+              style={{padding:"4px 8px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,
+                fontFamily:"inherit",background:"#172333",color:"#4a6280",WebkitTapHighlightColor:"transparent"}}>🧹</button>
             <button onClick={checkFlowchart}
-              style={{padding:"3px 11px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit",background:"#15803d",color:"#fff"}}>✓ Check</button>
-            {mode==="connect"&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700,marginLeft:4}}>
-              {cfrom?"→ Click destination":"→ Click source first"}</span>}
-            {mode==="delete"&&<span style={{fontSize:10,color:"#f87171",fontWeight:700,marginLeft:4}}>→ Click shape or × on arrow</span>}
+              style={{padding:"4px 12px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:700,
+                fontFamily:"inherit",background:"#15803d",color:"#fff",WebkitTapHighlightColor:"transparent"}}>✓ Check</button>
+            {mode==="connect"&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700}}>
+              {cfrom?"→ Tap destination":"→ Tap source first"}</span>}
+            {mode==="delete"&&<span style={{fontSize:10,color:"#f87171",fontWeight:700}}>→ Tap shape or × on arrow</span>}
           </div>
 
           {/* Feedback */}
-          {feedback&&<div style={{padding:"6px 13px",flexShrink:0,fontSize:11,fontWeight:600,display:"flex",gap:8,
+          {feedback&&<div style={{padding:"6px 12px",flexShrink:0,fontSize:11,fontWeight:600,display:"flex",gap:7,
             background:feedback.ok?"#052e16":"#3f0707",color:feedback.ok?"#4ade80":"#fca5a5",
             borderBottom:`1px solid ${feedback.ok?"#16a34a":"#dc2626"}`}}>
             <span style={{flex:1}}>{feedback.msg}</span>
-            <button onClick={()=>setFeedback(null)} style={{background:"none",border:"none",color:"inherit",cursor:"pointer",fontSize:15}}>×</button>
+            <button onClick={()=>setFeedback(null)} style={{background:"none",border:"none",color:"inherit",cursor:"pointer",fontSize:15,padding:0}}>×</button>
           </div>}
 
           {/* Correction tips */}
-          {showTips&&tips.length>0&&<div style={{padding:"8px 13px",flexShrink:0,background:"#070f1e",
-            borderBottom:`1px solid ${BORDER}`,maxHeight:155,overflowY:"auto"}}>
+          {showTips&&tips.length>0&&<div style={{padding:"7px 12px",flexShrink:0,background:"#070f1e",
+            borderBottom:`1px solid ${BORDER}`,maxHeight:170,overflowY:"auto"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
               <span style={{fontSize:9,fontWeight:800,color:MUTED,textTransform:"uppercase",letterSpacing:1}}>Correction Tips</span>
-              <button onClick={()=>setShowTips(false)} style={{background:"none",border:"none",color:MUTED,cursor:"pointer",fontSize:13}}>×</button>
+              <button onClick={()=>setShowTips(false)} style={{background:"none",border:"none",color:MUTED,cursor:"pointer",fontSize:14,padding:0}}>×</button>
             </div>
             {tips.map((tip,i)=><div key={i} style={{display:"flex",gap:7,marginBottom:5,padding:"6px 8px",borderRadius:6,
               background:tip.sev==="error"?"#180808":tip.sev==="ok"?"#062010":"#0d1a0a",
@@ -842,65 +954,72 @@ export default function App() {
             </div>)}
           </div>}
 
-          {/* Canvas + Solution */}
-          <div style={{flex:1,display:"flex",overflow:"hidden"}}>
-            <div style={{flex:1,overflow:"auto"}}>
-              <div ref={canvasRef}
-                style={{position:"relative",minWidth:1100,minHeight:640,
-                  backgroundImage:"radial-gradient(circle, #1a2d4a 1.2px, transparent 1.2px)",
-                  backgroundSize:"28px 28px",backgroundPosition:"0 0"}}
-                onDrop={canvasDrop}
-                onDragOver={e=>{e.preventDefault();e.dataTransfer.dropEffect="copy";}}
-                onClick={()=>{if(mode==="connect")setCfrom(null);else setSelNode(null);}}
-                onMouseMove={canvasMouseMove} onMouseUp={canvasMouseUp} onMouseLeave={canvasMouseUp}>
+          {/* Canvas */}
+          <div style={{flex:1,overflow:"auto",WebkitOverflowScrolling:"touch"}}>
+            <div ref={canvasRef}
+              style={{position:"relative",minWidth:1100,minHeight:640,
+                backgroundImage:"radial-gradient(circle, #1a2d4a 1.2px, transparent 1.2px)",
+                backgroundSize:"28px 28px",backgroundPosition:"0 0",
+                cursor:tapType?"crosshair":"default"}}
+              onDrop={canvasDrop}
+              onDragOver={e=>{e.preventDefault();e.dataTransfer.dropEffect="copy";}}
+              onClick={canvasClick}
+              onMouseMove={canvasMouseMove}
+              onMouseUp={canvasMouseUp}
+              onMouseLeave={canvasMouseUp}
+              onTouchMove={canvasTouchMove}
+              onTouchEnd={canvasTouchEnd}>
 
-                {/* Arrow layer */}
-                <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:1}}>
-                  <defs>
-                    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-                      <polygon points="0 0,8 3,0 6" fill="#3d5a7a"/></marker>
-                  </defs>
-                  {conns.map(c=>{const p=getPath(c.from,c.to);return p?
-                    <path key={`${c.from}-${c.to}`} d={p} fill="none" stroke="#3d5a7a" strokeWidth="2" markerEnd="url(#arr)"/>:null;})}
-                </svg>
+              {/* Arrows */}
+              <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:1}}>
+                <defs>
+                  <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                    <polygon points="0 0,8 3,0 6" fill="#3d5a7a"/></marker>
+                </defs>
+                {conns.map(c=>{const p=getPath(c.from,c.to);return p?
+                  <path key={`${c.from}-${c.to}`} d={p} fill="none" stroke="#3d5a7a" strokeWidth="2" markerEnd="url(#arr)"/>:null;})}
+              </svg>
 
-                {/* Delete conn buttons */}
-                {mode==="delete"&&conns.map(c=>{const mid=getMid(c.from,c.to);return mid?
-                  <button key={`dx-${c.from}-${c.to}`} onClick={()=>deleteConn(c.from,c.to)}
-                    style={{position:"absolute",left:mid.x-9,top:mid.y-9,width:18,height:18,borderRadius:"50%",
-                      border:"none",background:"#dc2626",color:"#fff",fontSize:11,fontWeight:800,
-                      cursor:"pointer",zIndex:5,lineHeight:"18px",textAlign:"center",padding:0}}>×</button>:null;})}
+              {/* Delete-conn buttons */}
+              {mode==="delete"&&conns.map(c=>{const mid=getMid(c.from,c.to);return mid?
+                <button key={`dx-${c.from}-${c.to}`} onClick={()=>deleteConn(c.from,c.to)}
+                  style={{position:"absolute",left:mid.x-11,top:mid.y-11,width:22,height:22,borderRadius:"50%",
+                    border:"none",background:"#dc2626",color:"#fff",fontSize:13,fontWeight:800,
+                    cursor:"pointer",zIndex:5,lineHeight:"22px",textAlign:"center",padding:0,
+                    WebkitTapHighlightColor:"transparent"}}>×</button>:null;})}
 
-                {/* Nodes */}
-                {nodes.map(nd=><div key={nd.id}
-                  style={{position:"absolute",left:nd.x,top:nd.y,width:W(nd.type),height:H(nd.type),zIndex:2,
-                    cursor:mode==="delete"?"not-allowed":mode==="connect"?"crosshair":"grab",
-                    filter:(selNode===nd.id||cfrom===nd.id)?`drop-shadow(0 0 7px ${cfrom===nd.id?"#f97316":"#0ea5e9"})`:"none",
-                    transition:"filter .1s"}}
-                  onMouseDown={e=>nodeMouseDown(e,nd.id)}
-                  onClick={e=>nodeClick(e,nd.id)}
-                  onDoubleClick={e=>nodeDbl(e,nd.id)}>
-                  <Shape type={nd.type} text={nd.text} w={W(nd.type)} h={H(nd.type)} selected={selNode===nd.id||cfrom===nd.id}/>
-                  {editing===nd.id&&<input autoFocus value={editTxt}
-                    onChange={e=>setEditTxt(e.target.value)}
-                    onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")commitEdit();}}
-                    onBlur={commitEdit}
-                    style={{position:"absolute",inset:0,width:"100%",height:"100%",
-                      background:"rgba(2,8,23,.93)",color:"#e2e8f0",border:"2px solid #38bdf8",borderRadius:4,
-                      textAlign:"center",fontSize:11,fontWeight:700,fontFamily:"inherit",zIndex:20}}/>}
-                </div>)}
+              {/* Nodes */}
+              {nodes.map(nd=><div key={nd.id}
+                style={{position:"absolute",left:nd.x,top:nd.y,width:W(nd.type),height:H(nd.type),zIndex:2,
+                  cursor:tapType?"crosshair":mode==="delete"?"not-allowed":mode==="connect"?"crosshair":"grab",
+                  filter:(selNode===nd.id||cfrom===nd.id)
+                    ?`drop-shadow(0 0 7px ${cfrom===nd.id?"#f97316":"#0ea5e9"})`:"none",
+                  transition:"filter .1s",WebkitTapHighlightColor:"transparent",
+                  touchAction:"none"}}
+                onMouseDown={e=>nodeMouseDown(e,nd.id)}
+                onTouchStart={e=>nodeTouchStart(e,nd.id)}
+                onClick={e=>nodeClick(e,nd.id)}
+                onDoubleClick={e=>nodeDbl(e,nd.id)}>
+                <Shape type={nd.type} text={nd.text} w={W(nd.type)} h={H(nd.type)} selected={selNode===nd.id||cfrom===nd.id}/>
+                {editing===nd.id&&<input autoFocus value={editTxt}
+                  onChange={e=>setEditTxt(e.target.value)}
+                  onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")commitEdit();}}
+                  onBlur={commitEdit}
+                  style={{position:"absolute",inset:0,width:"100%",height:"100%",
+                    background:"rgba(2,8,23,.93)",color:"#e2e8f0",border:"2px solid #38bdf8",borderRadius:4,
+                    textAlign:"center",fontSize:11,fontWeight:700,fontFamily:"inherit",zIndex:20}}/>}
+              </div>)}
 
-                {nodes.length===0&&<div style={{position:"absolute",inset:0,display:"flex",
-                  alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                  <div style={{textAlign:"center",color:"#1a3050"}}>
-                    <div style={{fontSize:40,opacity:.5,marginBottom:10}}>📋</div>
-                    <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>Drag shapes from the left panel</div>
-                    <div style={{fontSize:11}}>Then use Connect mode to draw arrows between them</div>
-                  </div>
-                </div>}
-              </div>
+              {/* Empty state */}
+              {nodes.length===0&&<div style={{position:"absolute",inset:0,display:"flex",
+                alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+                <div style={{textAlign:"center",color:"#1a3050",padding:"0 20px"}}>
+                  <div style={{fontSize:38,opacity:.5,marginBottom:10}}>📋</div>
+                  <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>Tap a symbol on the left, then tap here to place it</div>
+                  <div style={{fontSize:11}}>On desktop: drag shapes onto the canvas</div>
+                </div>
+              </div>}
             </div>
-
           </div>
         </div>
       </div>
