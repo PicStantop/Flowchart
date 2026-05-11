@@ -706,10 +706,11 @@ export default function App() {
   const canvasMouseMove=useCallback(e=>{
     if(!dragNode.current||!canvasRef.current) return;
     didMove.current=true;
+    const {id,ox,oy}=dragNode.current;
     const r=canvasRef.current.getBoundingClientRect();
-    const x=Math.max(0,e.clientX-r.left-dragNode.current.ox);
-    const y=Math.max(0,e.clientY-r.top-dragNode.current.oy);
-    setNodes(ns=>ns.map(n=>n.id===dragNode.current.id?{...n,x,y}:n));
+    const x=Math.max(0,e.clientX-r.left-ox);
+    const y=Math.max(0,e.clientY-r.top-oy);
+    setNodes(ns=>ns.map(n=>n.id===id?{...n,x,y}:n));
   },[]);
 
   const canvasMouseUp=useCallback(()=>{
@@ -744,11 +745,12 @@ export default function App() {
     if(!dragNode.current||!canvasRef.current) return;
     e.preventDefault();
     didMove.current=true;
+    const {id,ox,oy}=dragNode.current;
     const touch=e.touches[0];
     const r=canvasRef.current.getBoundingClientRect();
-    const x=Math.max(0,touch.clientX-r.left-dragNode.current.ox);
-    const y=Math.max(0,touch.clientY-r.top-dragNode.current.oy);
-    setNodes(ns=>ns.map(n=>n.id===dragNode.current.id?{...n,x,y}:n));
+    const x=Math.max(0,touch.clientX-r.left-ox);
+    const y=Math.max(0,touch.clientY-r.top-oy);
+    setNodes(ns=>ns.map(n=>n.id===id?{...n,x,y}:n));
   },[]);
 
   const canvasTouchEnd=useCallback(e=>{
