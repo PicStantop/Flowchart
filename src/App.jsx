@@ -167,7 +167,8 @@ const isUnlabelled = n =>
 // ── Variable analysis helpers ─────────────────────────────────────────────────
 // Words that are NOT variable names
 const FLOW_KEYWORDS = new Set([
-  'start','end','input','output','display','print','read','write','show',
+  'start','end','stop','begin','halt','terminate',
+  'input','output','display','print','read','write','show',
   'get','set','if','then','else','yes','no','true','false',
   'and','or','not','mod','div','rem','to','from','by','step',
   'while','do','for','begin','stop','halt','return','put',
