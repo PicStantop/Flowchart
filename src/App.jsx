@@ -156,15 +156,148 @@ const BASE = {
   ],
 };
 
+// ── Default placeholder labels (shapes with these haven't been renamed) ─────
+const DEF_LABELS = new Set(Object.values(DEF_TEXT));
+const PAL_LABELS = new Set(Object.values(SYM).map(s=>s.label));
+const isUnlabelled = n =>
+  !n.text || !n.text.trim() ||
+  DEF_LABELS.has(n.text.trim()) ||
+  PAL_LABELS.has(n.text.trim());
+
+// ── Variable analysis helpers ─────────────────────────────────────────────────
+// Words that are NOT variable names
+const FLOW_KEYWORDS = new Set([
+  'start','end','input','output','display','print','read','write','show',
+  'get','set','if','then','else','yes','no','true','false',
+  'and','or','not','mod','div','rem','to','from','by','step',
+  'while','do','for','begin','stop','halt','return','put',
+  'calculate','compute','find','check','is','are','the','of','an','a',
+]);
+
+function extractTokens(text) {
+  // Extract variable-like tokens: start with letter, contain letters/digits/underscore
+  const raw = text.match(/[A-Za-z_][A-Za-z0-9_]*/g) || [];
+  return raw.filter(t => !FLOW_KEYWORDS.has(t.toLowerCase()));
+}
+
+function getVarTips(nodes) {
+  const tips = [];
+
+  // Build a map: lowercase token -> Set of actual spellings seen, and which shapes
+  const spellings = {}; // key: lower -> { forms: Map<spelling, [shapeTexts]> }
+  nodes.forEach(n => {
+    if (isUnlabelled(n)) return;
+    extractTokens(n.text).forEach(tok => {
+      const key = tok.toLowerCase();
+      if (!spellings[key]) spellings[key] = new Map();
+      if (!spellings[key].has(tok)) spellings[key].set(tok, []);
+      spellings[key].get(tok).push(n.text);
+    });
+  });
+
+  // Flag variables that appear in more than one casing
+  Object.entries(spellings).forEach(([lower, forms]) => {
+    if (forms.size > 1) {
+      const variants = [...forms.keys()];
+      // Show which shapes each variant appears in
+      const detail = variants.map(v => `"${v}" (in: ${[...new Set(forms.get(v))].join(', ')})`).join(' vs ');
+      tips.push({ sev:"error", icon:"🔤",
+        title:`Variable name inconsistency: "${lower}"`,
+        msg:`You used the same variable with different capitalisation: ${detail}. Pick one spelling and use it everywhere.`
+      });
+    }
+  });
+
+  // Check variables used in output/process that were never defined in input or LHS of assignment
+  // "Defined" = appears in an IO input shape OR on the LEFT side of = in a process/decision
+  const defined = new Set();
+
+  nodes.forEach(n => {
+    if (isUnlabelled(n)) return;
+    const text = n.text;
+
+    if (n.type === "io") {
+      // "Input X, Y" or "Read X" — the variables after the keyword are defined
+      const stripped = text.replace(/^(input|read|get)\s*/i, "");
+      // Could be "Input A, B" — split by comma/space
+      stripped.split(/[,\s]+/).forEach(tok => {
+        const clean = tok.match(/[A-Za-z_][A-Za-z0-9_]*/);
+        if (clean && !FLOW_KEYWORDS.has(clean[0].toLowerCase()))
+          defined.add(clean[0].toLowerCase());
+      });
+    }
+
+    if (n.type === "process") {
+      // "X = ..." or "X = Y + Z" — LHS of = is defined
+      const assignMatch = text.match(/^([A-Za-z_][A-Za-z0-9_,\s]*)\s*=/);
+      if (assignMatch) {
+        // Could be "F, I = ..." or "Sum=..."
+        assignMatch[1].split(/[,\s]+/).forEach(tok => {
+          const clean = tok.match(/[A-Za-z_][A-Za-z0-9_]*/);
+          if (clean && !FLOW_KEYWORDS.has(clean[0].toLowerCase()))
+            defined.add(clean[0].toLowerCase());
+        });
+      }
+    }
+  });
+
+  // Now check output shapes and process RHS for undefined variables
+  const undefinedUsed = new Set();
+  nodes.forEach(n => {
+    if (isUnlabelled(n)) return;
+    const text = n.text;
+
+    if (n.type === "io" && /^(display|print|output|show|write)/i.test(text)) {
+      // RHS of display — extract all tokens
+      const rhs = text.replace(/^(display|print|output|show|write)\s*/i, "");
+      extractTokens(rhs).forEach(tok => {
+        if (!defined.has(tok.toLowerCase())) undefinedUsed.add(tok);
+      });
+    }
+
+    if (n.type === "process") {
+      // RHS of assignment
+      const eqIdx = text.indexOf("=");
+      if (eqIdx !== -1) {
+        const rhs = text.slice(eqIdx+1);
+        extractTokens(rhs).forEach(tok => {
+          if (!defined.has(tok.toLowerCase())) undefinedUsed.add(tok);
+        });
+      }
+    }
+
+    if (n.type === "decision") {
+      // All tokens in condition should be defined
+      extractTokens(text).forEach(tok => {
+        if (!defined.has(tok.toLowerCase())) undefinedUsed.add(tok);
+      });
+    }
+  });
+
+  if (undefinedUsed.size > 0) {
+    const list = [...undefinedUsed].join(", ");
+    tips.push({ sev:"tip", icon:"❓",
+      title:`Variable${undefinedUsed.size>1?"s":""} used but never defined: ${list}`,
+      msg:`Make sure every variable is introduced in an Input shape or assigned in a Process shape before it is used in a calculation, condition, or output.`
+    });
+  }
+
+  return tips;
+}
+
 // ── Correction tips ───────────────────────────────────────────────────────────
 function getTips(nodes, conns, ch) {
   if (!nodes.length) return [{ sev:"error", icon:"📋", title:"Canvas is empty",
     msg:"Start by dragging (or tapping) shapes from the left panel. Begin with a Start terminal." }];
+
   const cnt = {};
   nodes.forEach(n => { cnt[n.type]=(cnt[n.type]||0)+1; });
   const tips = [];
+
+  // ── 1. Required shape counts ────────────────────────────────────────────────
   if ((cnt.terminal||0)<2) tips.push({ sev:"error", icon:"🔴", title:"Missing Start/End terminals",
-    msg:`Every flowchart needs a START and END terminal. You have ${cnt.terminal||0} — drag ${2-(cnt.terminal||0)} more.` });
+    msg:`Every flowchart needs a START and END terminal. You have ${cnt.terminal||0} — add ${2-(cnt.terminal||0)} more.` });
+
   const help = {
     process:"Process boxes (rectangles) handle calculations and assignments like Sum=A+B or N=N+1.",
     decision:"Decision diamonds ask a Yes/No question and split the flow into TWO paths.",
@@ -173,23 +306,53 @@ function getTips(nodes, conns, ch) {
   };
   Object.entries(ch.req).forEach(([type,need]) => {
     const have = cnt[type]||0;
-    if (have<need) tips.push({ sev:"error", icon:"⚠️",
+    if (have < need) tips.push({ sev:"error", icon:"⚠️",
       title:`Need ${need-have} more "${SYM[type].label}" shape${need-have>1?"s":""}`,
       msg: help[type] });
   });
+
+  // ── 2. Extra shapes beyond requirement (allow 1 tolerance) ─────────────────
+  Object.entries(ch.req).forEach(([type,need]) => {
+    const have = cnt[type]||0;
+    // Terminals: exactly 2; others: no more than need+1
+    const max = type==="terminal" ? 2 : need+1;
+    if (have > max) tips.push({ sev:"error", icon:"➕",
+      title:`Too many "${SYM[type].label}" shapes (${have}, expected ${need})`,
+      msg:`Remove the extra ${have-need} "${SYM[type].label}" shape${have-need>1?"s":""} — having too many changes the logic of the flowchart.` });
+  });
+
+  // ── 3. Unlabelled / default-text shapes ────────────────────────────────────
+  const unlabelled = nodes.filter(isUnlabelled);
+  if (unlabelled.length) tips.push({ sev:"error", icon:"✏️",
+    title:`${unlabelled.length} shape${unlabelled.length>1?"s have":" has"} no label`,
+    msg:`Double-click each shape to give it a meaningful label. Shapes still showing their default name (e.g. "Process", "Condition?") have not been edited yet.` });
+
+  // ── 4. Connectivity checks ──────────────────────────────────────────────────
   const out={}, inc={};
   conns.forEach(c=>{ out[c.from]=(out[c.from]||0)+1; inc[c.to]=(inc[c.to]||0)+1; });
+
   const isolated = nodes.filter(n=>!out[n.id]&&!inc[n.id]);
   if (isolated.length) tips.push({ sev:"error", icon:"🔗",
     title:`${isolated.length} unconnected shape${isolated.length>1?"s":""}`,
     msg:"Switch to 🔗 Connect mode, tap the source shape first (it glows orange), then tap the destination." });
+
   nodes.filter(n=>n.type==="decision").forEach(d=>{
     if ((out[d.id]||0)<2) tips.push({ sev:"tip", icon:"💡",
       title:`"${d.text}" needs 2 outgoing arrows`,
-      msg:`A Decision diamond must have TWO arrows out — one YES and one NO. It has ${out[d.id]||0}.` });
+      msg:`A Decision diamond must have TWO arrows out — one YES and one NO. It currently has ${out[d.id]||0}.` });
   });
-  if (!tips.length) tips.push({ sev:"ok", icon:"✅", title:"Looking good!",
-    msg:"Shape counts and connections are correct. Your flowchart looks well structured!" });
+
+  // ── 5. Check there is at least one arrow drawn ──────────────────────────────
+  if (conns.length===0 && nodes.length>1) tips.push({ sev:"error", icon:"➡️",
+    title:"No arrows connecting the shapes",
+    msg:"Switch to 🔗 Connect mode and draw arrows between your shapes to show the flow direction." });
+
+  // ── 6. Variable consistency ────────────────────────────────────────────────
+  const varTips = getVarTips(nodes);
+  varTips.forEach(t => tips.push(t));
+
+  if (!tips.length) tips.push({ sev:"ok", icon:"✅", title:"Excellent work!",
+    msg:"Shapes, labels, variable names and connections all look correct. Well done!" });
   return tips;
 }
 
