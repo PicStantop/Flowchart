@@ -714,12 +714,15 @@ export default function App() {
 
   const canvasMouseUp=useCallback(()=>{
     if(dragNode.current&&didMove.current){
+      const dragId=dragNode.current.id;
+      dragNode.current=null;
       setNodes(ns=>{
-        const sn=ns.map(n=>n.id===dragNode.current.id?{...n,x:snap(n.x),y:snap(n.y)}:n);
+        const sn=ns.map(n=>n.id===dragId?{...n,x:snap(n.x),y:snap(n.y)}:n);
         pushHist(sn,connsRef.current); return sn;
       });
+    } else {
+      dragNode.current=null;
     }
-    dragNode.current=null;
   },[pushHist]);
 
   // ── Touch drag (mobile node move) ────────────────────────────────────────
@@ -756,12 +759,15 @@ export default function App() {
       return;
     }
     if(dragNode.current&&didMove.current){
+      const dragId=dragNode.current.id;
+      dragNode.current=null;
       setNodes(ns=>{
-        const sn=ns.map(n=>n.id===dragNode.current.id?{...n,x:snap(n.x),y:snap(n.y)}:n);
+        const sn=ns.map(n=>n.id===dragId?{...n,x:snap(n.x),y:snap(n.y)}:n);
         pushHist(sn,connsRef.current); return sn;
       });
+    } else {
+      dragNode.current=null;
     }
-    dragNode.current=null;
   },[tapType,placeOnCanvas,pushHist]);
 
   // ── Click handlers ───────────────────────────────────────────────────────
