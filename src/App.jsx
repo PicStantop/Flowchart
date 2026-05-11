@@ -569,6 +569,9 @@ export default function App() {
   const dragType=useRef(null);
   const dragNode=useRef(null);
   const didMove=useRef(false);
+  const histIdxRef=useRef(0);
+  const connsRef=useRef([]);
+  const nodesRef=useRef([]);
 
   useEffect(()=>{
     dbLoadCustomEx().then(ex=>{setCustomEx(ex);setLoaded(true);});
@@ -596,22 +599,42 @@ export default function App() {
     setEditing(null); setMode("move");
   },[cIdx, currentUser?.id]);
 
+  // Keep refs in sync so callbacks always read current values
+  useEffect(()=>{ histIdxRef.current=histIdx; },[histIdx]);
+  useEffect(()=>{ connsRef.current=conns; },[conns]);
+  useEffect(()=>{ nodesRef.current=nodes; },[nodes]);
+
   const pushHist=useCallback((nn,nc)=>{
-    setHistory(h=>[...h.slice(0,histIdx+1),{nodes:nn,conns:nc}].slice(-MAX_HIST));
-    setHistIdx(i=>Math.min(i+1,MAX_HIST-1));
-  },[histIdx]);
+    const idx=histIdxRef.current;
+    setHistory(h=>[...h.slice(0,idx+1),{nodes:nn,conns:nc}].slice(-MAX_HIST));
+    setHistIdx(Math.min(idx+1,MAX_HIST-1));
+    histIdxRef.current=Math.min(idx+1,MAX_HIST-1);
+  },[]);
 
   const undo=useCallback(()=>{
-    if(histIdx<=0) return;
-    const p=history[histIdx-1];
-    setNodes(p.nodes); setConns(p.conns); setHistIdx(i=>i-1);
-  },[history,histIdx]);
+    const idx=histIdxRef.current;
+    if(idx<=0) return;
+    setHistory(h=>{
+      const p=h[idx-1];
+      if(!p) return h;
+      setNodes(p.nodes); setConns(p.conns);
+      return h;
+    });
+    setHistIdx(idx-1);
+    histIdxRef.current=idx-1;
+  },[]);
 
   const redo=useCallback(()=>{
-    if(histIdx>=history.length-1) return;
-    const n=history[histIdx+1];
-    setNodes(n.nodes); setConns(n.conns); setHistIdx(i=>i+1);
-  },[history,histIdx]);
+    const idx=histIdxRef.current;
+    setHistory(h=>{
+      if(idx>=h.length-1) return h;
+      const n=h[idx+1];
+      setNodes(n.nodes); setConns(n.conns);
+      setHistIdx(idx+1);
+      histIdxRef.current=idx+1;
+      return h;
+    });
+  },[]);
 
   useEffect(()=>{
     const k=e=>{
@@ -693,11 +716,11 @@ export default function App() {
     if(dragNode.current&&didMove.current){
       setNodes(ns=>{
         const sn=ns.map(n=>n.id===dragNode.current.id?{...n,x:snap(n.x),y:snap(n.y)}:n);
-        pushHist(sn,conns); return sn;
+        pushHist(sn,connsRef.current); return sn;
       });
     }
     dragNode.current=null;
-  },[conns,pushHist]);
+  },[pushHist]);
 
   // ── Touch drag (mobile node move) ────────────────────────────────────────
   const nodeTouchStart=useCallback((e,id)=>{
@@ -735,11 +758,11 @@ export default function App() {
     if(dragNode.current&&didMove.current){
       setNodes(ns=>{
         const sn=ns.map(n=>n.id===dragNode.current.id?{...n,x:snap(n.x),y:snap(n.y)}:n);
-        pushHist(sn,conns); return sn;
+        pushHist(sn,connsRef.current); return sn;
       });
     }
     dragNode.current=null;
-  },[tapType,placeOnCanvas,conns,pushHist]);
+  },[tapType,placeOnCanvas,pushHist]);
 
   // ── Click handlers ───────────────────────────────────────────────────────
   const nodeClick=useCallback((e,id)=>{
