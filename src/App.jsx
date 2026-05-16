@@ -67,6 +67,34 @@ async function dbDeleteCustomEx(id) {
   await db.from("custom_exercises").delete().eq("id", id);
 }
 
+async function dbRenameUser(id, newName) {
+  const { error } = await db.from("users").update({ name: newName }).eq("id", id);
+  return !error;
+}
+
+async function dbDeleteUser(id) {
+  // progress and attempt_logs cascade-delete via FK
+  const { error } = await db.from("users").delete().eq("id", id);
+  return !error;
+}
+
+async function dbLogAttempt(userId, exId, exTitle, passed, tips) {
+  await db.from("attempt_logs").insert({
+    id: `a${Date.now()}${Math.random().toString(36).slice(2,6)}`,
+    user_id: userId, exercise_id: exId, exercise_title: exTitle,
+    attempted_at: Date.now(), passed, tips,
+  });
+}
+
+async function dbLoadAttempts(userId) {
+  try {
+    const { data } = await db.from("attempt_logs")
+      .select("*").eq("user_id", userId)
+      .order("attempted_at", { ascending: false });
+    return data || [];
+  } catch { return []; }
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const GRID = 28;
 const snap = v => Math.round(v / GRID) * GRID;
@@ -159,10 +187,15 @@ const BASE = {
 // ── Default placeholder labels (shapes with these haven't been renamed) ─────
 const DEF_LABELS = new Set(Object.values(DEF_TEXT));
 const PAL_LABELS = new Set(Object.values(SYM).map(s=>s.label));
-const isUnlabelled = n =>
-  !n.text || !n.text.trim() ||
-  DEF_LABELS.has(n.text.trim()) ||
-  PAL_LABELS.has(n.text.trim());
+// "Start" and "End" are perfectly valid terminal labels — don't flag them
+const VALID_TERMINAL_LABELS = new Set(["start","end","stop","begin","halt"]);
+const isUnlabelled = n => {
+  if (!n.text || !n.text.trim()) return true;
+  const trimmed = n.text.trim();
+  // Terminals with standard labels are fine
+  if (n.type === "terminal" && VALID_TERMINAL_LABELS.has(trimmed.toLowerCase())) return false;
+  return DEF_LABELS.has(trimmed) || PAL_LABELS.has(trimmed);
+};
 
 // ── Variable analysis helpers ─────────────────────────────────────────────────
 // Words that are NOT variable names
@@ -513,6 +546,16 @@ function TeacherDashboard({ onLogout, baseEx }) {
   const [form,setForm]=useState({title:"",desc:"",hint:"",steps:[]});
   const [newStep,setNewStep]=useState({type:"terminal",text:""});
   const [msg,setMsg]=useState("");
+  // Rename / delete
+  const [renaming,setRenaming]=useState(null); // user id
+  const [renameVal,setRenameVal]=useState("");
+  const [renameErr,setRenameErr]=useState("");
+  const [confirmDel,setConfirmDel]=useState(null); // user id
+  // Review
+  const [reviewing,setReviewing]=useState(null); // user object
+  const [attempts,setAttempts]=useState([]);
+  const [attLoading,setAttLoading]=useState(false);
+
   const BG="#060d1a",PANEL="#0c1628",BORDER="#1e3a5f",MUTED="#2a4a70";
   const inp={width:"100%",padding:"7px 10px",borderRadius:6,border:`1px solid ${BORDER}`,
     background:"#0a1628",color:"#e2e8f0",fontSize:12,fontFamily:"inherit",outline:"none",boxSizing:"border-box"};
@@ -532,6 +575,39 @@ function TeacherDashboard({ onLogout, baseEx }) {
   };
   const filtered=filterLvl==="all"?users:users.filter(u=>u.level===filterLvl);
 
+  // ── Rename ───────────────────────────────────────────────────────────────
+  const startRename=(u)=>{ setRenaming(u.id); setRenameVal(u.name); setRenameErr(""); };
+  const commitRename=async()=>{
+    const t=renameVal.trim();
+    if(!t){ setRenameErr("Name cannot be empty."); return; }
+    const u=users.find(u=>u.id===renaming);
+    if(users.some(x=>x.id!==renaming&&x.name.toLowerCase()===t.toLowerCase()&&x.level===u.level)){
+      setRenameErr("That name already exists in this class."); return;
+    }
+    const ok=await dbRenameUser(renaming,t);
+    if(ok){
+      setUsers(prev=>prev.map(x=>x.id===renaming?{...x,name:t}:x));
+      setRenaming(null);
+    } else {
+      setRenameErr("Save failed. Try again.");
+    }
+  };
+
+  // ── Delete ───────────────────────────────────────────────────────────────
+  const commitDelete=async()=>{
+    const ok=await dbDeleteUser(confirmDel);
+    if(ok) setUsers(prev=>prev.filter(x=>x.id!==confirmDel));
+    setConfirmDel(null);
+  };
+
+  // ── Review ───────────────────────────────────────────────────────────────
+  const openReview=async(u)=>{
+    setReviewing(u); setAttLoading(true); setTab("review");
+    const data=await dbLoadAttempts(u.id);
+    setAttempts(data); setAttLoading(false);
+  };
+
+  // ── Add exercise ─────────────────────────────────────────────────────────
   const addStep=()=>{
     if(!newStep.text.trim()) return;
     setForm(f=>({...f,steps:[...f.steps,{...newStep}]}));
@@ -548,17 +624,23 @@ function TeacherDashboard({ onLogout, baseEx }) {
     setForm({title:"",desc:"",hint:"",steps:[]});
     setMsg("ok"); setTimeout(()=>setMsg(""),3000);
   };
-  const handleDelete=async(lvl,id)=>{
+  const handleDeleteEx=async(lvl,id)=>{
     await dbDeleteCustomEx(id);
     setCustomEx(prev=>({...prev,[lvl]:prev[lvl].filter(e=>e.id!==id)}));
   };
 
-  const TabBtn=({id,label})=><button onClick={()=>setTab(id)}
+  const TabBtn=({id,label,onClick})=><button onClick={onClick||(()=>setTab(id))}
     style={{padding:"5px 13px",borderRadius:6,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,
       fontFamily:"inherit",background:tab===id?"#0c4a6e":"transparent",color:tab===id?"#7dd3fc":"#475569"}}>{label}</button>;
 
+  const sevColor=sev=>sev==="error"?"#f87171":sev==="ok"?"#4ade80":"#fbbf24";
+  const sevBg=sev=>sev==="error"?"#1a0505":sev==="ok"?"#052e16":"#1a0f00";
+  const sevBorder=sev=>sev==="error"?"#3f0707":sev==="ok"?"#14532d":"#3f2000";
+
   return <div style={{height:"100vh",background:BG,color:"#e2e8f0",
     fontFamily:"'Segoe UI',system-ui,sans-serif",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+    {/* Header */}
     <header style={{background:PANEL,borderBottom:`1px solid ${BORDER}`,height:48,
       display:"flex",alignItems:"center",padding:"0 14px",gap:8,flexShrink:0,flexWrap:"wrap"}}>
       <span style={{fontSize:14,fontWeight:800,color:"#38bdf8"}}>FlowBuilder</span>
@@ -567,6 +649,7 @@ function TeacherDashboard({ onLogout, baseEx }) {
         <TabBtn id="students" label="👥 Students"/>
         <TabBtn id="exercises" label="📚 Exercises"/>
         <TabBtn id="add" label="➕ Add Exercise"/>
+        {reviewing&&<TabBtn id="review" label={`🔍 ${reviewing.name}`}/>}
       </div>
       <button onClick={onLogout} style={{marginLeft:"auto",padding:"3px 10px",borderRadius:5,
         border:`1px solid ${BORDER}`,background:"transparent",color:MUTED,fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>Log out</button>
@@ -575,7 +658,7 @@ function TeacherDashboard({ onLogout, baseEx }) {
     <div style={{flex:1,overflow:"auto",padding:"16px 18px"}}>
       {loading&&<div style={{color:MUTED,textAlign:"center",padding:"40px 0",fontSize:13}}>Loading students…</div>}
 
-      {/* Students */}
+      {/* ── Students tab ── */}
       {!loading&&tab==="students"&&<div>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:13,flexWrap:"wrap"}}>
           <h2 style={{margin:0,fontSize:14,fontWeight:800,color:"#f1f5f9"}}>Students ({filtered.length})</h2>
@@ -587,28 +670,52 @@ function TeacherDashboard({ onLogout, baseEx }) {
               {l==="all"?"All":l.toUpperCase()}</button>)}
           </div>
         </div>
+
         {filtered.length===0
           ? <div style={{color:MUTED,fontSize:13,textAlign:"center",padding:"40px 0"}}>No students registered yet.</div>
-          : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:9}}>
+          : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))",gap:9}}>
             {filtered.map(u=>{
               const p=getProg(u);
               const exs=allEx(u.level);
+              const isRenaming=renaming===u.id;
               return <div key={u.id} style={{background:PANEL,borderRadius:10,border:`1px solid ${BORDER}`,padding:"12px 14px"}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                {/* Name row */}
+                <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}>
                   <div style={{width:28,height:28,borderRadius:"50%",background:"#0c4a6e",display:"flex",
                     alignItems:"center",justifyContent:"center",fontSize:12,color:"#7dd3fc",fontWeight:800,flexShrink:0}}>
                     {u.name[0].toUpperCase()}</div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{u.name}</div>
-                    <div style={{fontSize:10,color:MUTED,fontWeight:600}}>{u.level.toUpperCase()}</div>
-                  </div>
-                  <div style={{fontSize:13,fontWeight:800,color:p.pct===100?"#4ade80":p.pct>50?"#fbbf24":"#60a5fa",flexShrink:0}}>{p.pct}%</div>
+                  {isRenaming ? (
+                    <div style={{flex:1,minWidth:0}}>
+                      <input value={renameVal} onChange={e=>setRenameVal(e.target.value)}
+                        onKeyDown={e=>{if(e.key==="Enter")commitRename();if(e.key==="Escape")setRenaming(null);}}
+                        style={{...inp,padding:"4px 7px",fontSize:11,marginBottom:renameErr?3:0}}
+                        autoFocus/>
+                      {renameErr&&<div style={{fontSize:10,color:"#f87171"}}>{renameErr}</div>}
+                      <div style={{display:"flex",gap:4,marginTop:4}}>
+                        <button onClick={commitRename} style={{padding:"2px 8px",borderRadius:4,border:"none",cursor:"pointer",
+                          background:"#15803d",color:"#fff",fontSize:10,fontWeight:700,fontFamily:"inherit"}}>Save</button>
+                        <button onClick={()=>setRenaming(null)} style={{padding:"2px 8px",borderRadius:4,border:"none",cursor:"pointer",
+                          background:"#172333",color:"#64748b",fontSize:10,fontWeight:700,fontFamily:"inherit"}}>Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{u.name}</div>
+                      <div style={{fontSize:10,color:MUTED,fontWeight:600}}>{u.level.toUpperCase()}</div>
+                    </div>
+                  )}
+                  {!isRenaming&&<div style={{fontSize:13,fontWeight:800,
+                    color:p.pct===100?"#4ade80":p.pct>50?"#fbbf24":"#60a5fa",flexShrink:0}}>{p.pct}%</div>}
                 </div>
-                <div style={{height:5,background:"#1e3a5f",borderRadius:3,overflow:"hidden",marginBottom:6}}>
+
+                {/* Progress bar */}
+                <div style={{height:5,background:"#1e3a5f",borderRadius:3,overflow:"hidden",marginBottom:5}}>
                   <div style={{width:`${p.pct}%`,height:"100%",borderRadius:3,
                     background:p.pct===100?"#34d399":p.pct>50?"#fbbf24":"#60a5fa",transition:"width .5s"}}/></div>
                 <div style={{fontSize:10,color:MUTED,marginBottom:7}}>{p.done} / {p.total} completed</div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+
+                {/* Exercise badges */}
+                <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:9}}>
                   {exs.map(ex=>{
                     const done=u.progress?.[ex.id]?.completed;
                     const att=u.progress?.[ex.id]?.attempts||0;
@@ -619,12 +726,96 @@ function TeacherDashboard({ onLogout, baseEx }) {
                       {done?"✓ ":""}{ex.title.length>11?ex.title.slice(0,9)+"…":ex.title}</div>;
                   })}
                 </div>
+
+                {/* Action buttons */}
+                {!isRenaming&&<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                  <button onClick={()=>openReview(u)}
+                    style={{padding:"3px 9px",borderRadius:5,border:"none",cursor:"pointer",
+                      background:"#0c3554",color:"#7dd3fc",fontSize:10,fontWeight:700,fontFamily:"inherit"}}>🔍 Review Work</button>
+                  <button onClick={()=>startRename(u)}
+                    style={{padding:"3px 9px",borderRadius:5,border:"none",cursor:"pointer",
+                      background:"#1e1b4b",color:"#a5b4fc",fontSize:10,fontWeight:700,fontFamily:"inherit"}}>✏️ Rename</button>
+                  <button onClick={()=>setConfirmDel(u.id)}
+                    style={{padding:"3px 9px",borderRadius:5,border:"none",cursor:"pointer",
+                      background:"#1a0505",color:"#f87171",fontSize:10,fontWeight:700,fontFamily:"inherit"}}>🗑️ Delete</button>
+                </div>}
+              </div>;
+            })}
+          </div>}
+
+        {/* Delete confirmation modal */}
+        {confirmDel&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",display:"flex",
+          alignItems:"center",justifyContent:"center",zIndex:100}}>
+          <div style={{background:PANEL,border:`1px solid #7f1d1d`,borderRadius:12,padding:"24px 28px",maxWidth:320,width:"90%"}}>
+            <div style={{fontSize:14,fontWeight:800,color:"#f87171",marginBottom:8}}>Delete Student?</div>
+            <div style={{fontSize:12,color:"#94a3b8",marginBottom:18}}>
+              This will permanently delete <strong style={{color:"#f1f5f9"}}>{users.find(u=>u.id===confirmDel)?.name}</strong> and all their progress and attempt history. This cannot be undone.
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={commitDelete}
+                style={{flex:1,padding:"8px",borderRadius:7,border:"none",cursor:"pointer",
+                  background:"#dc2626",color:"#fff",fontSize:12,fontWeight:800,fontFamily:"inherit"}}>Yes, Delete</button>
+              <button onClick={()=>setConfirmDel(null)}
+                style={{flex:1,padding:"8px",borderRadius:7,border:"none",cursor:"pointer",
+                  background:"#172333",color:"#64748b",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>Cancel</button>
+            </div>
+          </div>
+        </div>}
+      </div>}
+
+      {/* ── Review tab ── */}
+      {tab==="review"&&reviewing&&<div>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+          <button onClick={()=>{setTab("students");setReviewing(null);setAttempts([]);}}
+            style={{background:"none",border:"none",color:MUTED,cursor:"pointer",fontSize:12,fontFamily:"inherit",padding:0}}>← Back</button>
+          <h2 style={{margin:0,fontSize:14,fontWeight:800,color:"#f1f5f9"}}>
+            {reviewing.name}'s Work
+            <span style={{fontSize:10,color:MUTED,fontWeight:600,marginLeft:8}}>{reviewing.level.toUpperCase()}</span>
+          </h2>
+        </div>
+
+        {attLoading
+          ? <div style={{color:MUTED,textAlign:"center",padding:"40px 0",fontSize:13}}>Loading attempts…</div>
+          : attempts.length===0
+          ? <div style={{color:MUTED,fontSize:13,textAlign:"center",padding:"40px 0"}}>No attempts recorded yet.</div>
+          : <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {attempts.map((att,i)=>{
+              const tips=Array.isArray(att.tips)?att.tips:[];
+              const errors=tips.filter(t=>t.sev==="error");
+              const passed=att.passed;
+              return <div key={att.id} style={{background:PANEL,borderRadius:10,
+                border:`1px solid ${passed?"#16a34a":BORDER}`,padding:"12px 14px"}}>
+                <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:tips.length?10:0}}>
+                  <span style={{fontSize:14,flexShrink:0}}>{passed?"✅":"❌"}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9"}}>{att.exercise_title}</div>
+                    <div style={{fontSize:10,color:MUTED}}>
+                      {new Date(att.attempted_at).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})}
+                      {" · "}
+                      {new Date(att.attempted_at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}
+                    </div>
+                  </div>
+                  <span style={{fontSize:10,padding:"2px 8px",borderRadius:10,fontWeight:700,flexShrink:0,
+                    background:passed?"#052e16":"#1a0505",color:passed?"#4ade80":"#f87171",
+                    border:`1px solid ${passed?"#16a34a":"#dc2626"}`}}>
+                    {passed?"Passed":"Failed"}</span>
+                </div>
+                {tips.length>0&&<div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  {tips.map((tip,j)=><div key={j} style={{display:"flex",gap:8,padding:"6px 9px",borderRadius:7,
+                    background:sevBg(tip.sev),border:`1px solid ${sevBorder(tip.sev)}`}}>
+                    <span style={{fontSize:13,flexShrink:0}}>{tip.icon}</span>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:700,color:sevColor(tip.sev)}}>{tip.title}</div>
+                      <div style={{fontSize:10,color:"#64748b",lineHeight:1.5}}>{tip.msg}</div>
+                    </div>
+                  </div>)}
+                </div>}
               </div>;
             })}
           </div>}
       </div>}
 
-      {/* Exercises */}
+      {/* ── Exercises tab ── */}
       {!loading&&tab==="exercises"&&<div>
         <h2 style={{margin:"0 0 13px",fontSize:14,fontWeight:800,color:"#f1f5f9"}}>All Exercises</h2>
         {["jss2","ss2"].map(lvl=><div key={lvl} style={{marginBottom:20}}>
@@ -641,7 +832,7 @@ function TeacherDashboard({ onLogout, baseEx }) {
                 </div>
                 {isCustom&&<>
                   <span style={{fontSize:9,background:"#1e1b4b",color:"#a5b4fc",padding:"2px 5px",borderRadius:5,fontWeight:700,flexShrink:0}}>Custom</span>
-                  <button onClick={()=>handleDelete(lvl,ex.id)} style={{padding:"2px 7px",borderRadius:4,border:"none",
+                  <button onClick={()=>handleDeleteEx(lvl,ex.id)} style={{padding:"2px 7px",borderRadius:4,border:"none",
                     cursor:"pointer",background:"#3f0707",color:"#f87171",fontSize:10,fontWeight:700,fontFamily:"inherit",flexShrink:0}}>Delete</button>
                 </>}
               </div>;
@@ -650,7 +841,7 @@ function TeacherDashboard({ onLogout, baseEx }) {
         </div>)}
       </div>}
 
-      {/* Add Exercise */}
+      {/* ── Add Exercise tab ── */}
       {!loading&&tab==="add"&&<div style={{maxWidth:560}}>
         <h2 style={{margin:"0 0 13px",fontSize:14,fontWeight:800,color:"#f1f5f9"}}>Add New Exercise</h2>
         <div style={{display:"flex",gap:6,marginBottom:13}}>
@@ -1013,6 +1204,9 @@ export default function App() {
     setTips(t); setShowTips(true);
     const isOk=t.every(x=>x.sev!=="error");
     saveProgress(currentUser.id,ch.id,isOk);
+    // Log this attempt with the full tips for teacher review
+    dbLogAttempt(currentUser.id, ch.id, ch.title, isOk,
+      t.map(tip=>({sev:tip.sev, icon:tip.icon, title:tip.title, msg:tip.msg})));
     setFeedback(isOk
       ?{ok:true,msg:"✓ Excellent! Exercise marked as complete."}
       :{ok:false,msg:`Found ${t.filter(x=>x.sev==="error").length} issue(s) — see correction tips below ↓`});
